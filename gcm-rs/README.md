@@ -25,6 +25,12 @@ It lives next to the original Python app while it matures.
   desktop onto the window to upload them, and right-click for rename, delete or copy path. New folders and
   downloads go to your Downloads folder (configurable). It runs the system `sftp` client, so authentication
   works the same as in the SSH tab (see *SFTP* below).
+- **MultiExec**: the toolbar's *⚡ MultiExec* button sends whatever you type in one terminal to every
+  terminal in the group, like MobaXterm's MultiExec or GCM's cluster mode. All tabs start in the group;
+  right-click a tab and untick *Include in MultiExec* to leave one out. Grouped tabs show ⚡ and an
+  orange border. The bar under the toolbar also has *All*/*None* buttons and a command line that sends
+  one line to the whole group. Keys are re-encoded for each target, so arrow keys work even when one
+  terminal is in an application like vim or less.
 - **Quick connect** in the toolbar: `user@host:2222`, `telnet://router`, `rdp://winbox`,
   `serial://COM3:9600`.
 - **Password autofill**: replaces `ssh.expect`. A saved password is typed when the server first prints
@@ -117,7 +123,6 @@ when no password is saved. Defaults:
 
 ## Not yet
 
-- Multi-exec (typing into several tabs at once, GCM's "cluster" mode)
 - Tunnel manager UI (tunnels currently live on each SSH session)
 - IME input inside terminal tabs
 - Per-session colours and session logging

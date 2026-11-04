@@ -15,6 +15,8 @@ pub struct Tab {
     id: u64,
     session: Session,
     term: Terminal,
+    /// Receives input typed in other tabs while multi-exec is on.
+    in_group: bool,
 }
 
 enum Action {
@@ -47,6 +49,10 @@ pub struct App {
     quick: String,
     filter: String,
     show_sidebar: bool,
+    /// MobaXterm's MultiExec / GCM's cluster mode: typing goes to every tab in the group.
+    multiexec: bool,
+    /// Command line in the multi-exec bar.
+    multiexec_line: String,
     sidebar_tab: SidebarTab,
     /// SFTP browsers by terminal tab id, created when first shown.
     browsers: std::collections::HashMap<u64, Browser>,
@@ -75,6 +81,8 @@ impl App {
             quick: String::new(),
             filter: String::new(),
             show_sidebar: true,
+            multiexec: false,
+            multiexec_line: String::new(),
             sidebar_tab: SidebarTab::Sessions,
             browsers: Default::default(),
             status: None,
@@ -148,6 +156,7 @@ impl App {
                     id: new_id(),
                     session,
                     term,
+                    in_group: true,
                 })
             }
             Ok(None) => {
@@ -302,6 +311,15 @@ impl App {
             if ui.add(big("⚙", "Settings")).clicked() {
                 self.modal = Some(Modal::Settings(self.store.settings.clone()));
             }
+            let me = egui::Button::new(RichText::new("⚡  MultiExec").size(14.0))
+                .selected(self.multiexec);
+            if ui
+                .add(me)
+                .on_hover_text("Type into all terminals in the group at once")
+                .clicked()
+            {
+                self.multiexec = !self.multiexec;
+            }
             ui.separator();
             ui.label("Quick connect:");
             let resp = ui.add(
@@ -321,6 +339,67 @@ impl App {
                 }
             }
         });
+    }
+
+    /// Bar shown while multi-exec is on: who is in the group, plus a command
+    /// line that sends one line to all of them (GCM's cluster window).
+    fn multiexec_bar(&mut self, ui: &mut Ui) {
+        let accent = Color32::from_rgb(230, 140, 20);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("⚡ MultiExec").color(accent).strong());
+            let (live, total) = self.dock.iter_all_tabs().fold((0, 0), |(l, t), (_, tab)| {
+                (l + usize::from(tab.in_group), t + 1)
+            });
+            ui.label(format!("typing goes to {live} of {total} tab(s)"));
+            if ui.small_button("All").clicked() {
+                self.dock
+                    .iter_all_tabs_mut()
+                    .for_each(|(_, t)| t.in_group = true);
+            }
+            if ui.small_button("None").clicked() {
+                self.dock
+                    .iter_all_tabs_mut()
+                    .for_each(|(_, t)| t.in_group = false);
+            }
+            ui.separator();
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.multiexec_line)
+                    .hint_text("command for all tabs in the group")
+                    .desired_width(320.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            if (ui.button("Send").clicked() || enter) && !self.multiexec_line.is_empty() {
+                let line = format!("{}\r", std::mem::take(&mut self.multiexec_line));
+                let input = [crate::terminal::Input::Bytes(line.into_bytes())];
+                for (_, tab) in self.dock.iter_all_tabs_mut() {
+                    if tab.in_group {
+                        tab.term.replay(&input);
+                    }
+                }
+                resp.request_focus();
+            }
+            if ui.button("Stop").clicked() {
+                self.multiexec = false;
+            }
+        });
+    }
+
+    /// Copy what was typed into a grouped tab to the rest of the group.
+    fn mirror_input(&mut self) {
+        let mut typed = Vec::new();
+        for (_, tab) in self.dock.iter_all_tabs_mut() {
+            let inputs = tab.term.take_input();
+            if self.multiexec && tab.in_group && !inputs.is_empty() {
+                typed.push((tab.id, inputs));
+            }
+        }
+        for (src, inputs) in typed {
+            for (_, tab) in self.dock.iter_all_tabs_mut() {
+                if tab.in_group && tab.id != src {
+                    tab.term.replay(&inputs);
+                }
+            }
+        }
     }
 
     fn import_gcm(&mut self) {
@@ -1084,6 +1163,7 @@ struct Viewer<'a> {
     settings: &'a Settings,
     actions: &'a mut Vec<Action>,
     modal: &'a mut Option<Modal>,
+    multiexec: bool,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -1099,7 +1179,10 @@ impl TabViewer for Viewer<'_> {
             Some(t) if tab.session.protocol == Protocol::Local && tab.session.name.is_empty() => t,
             _ => tab.session.display_name(),
         };
-        let name = format!("{} {}", tab.session.protocol.icon(), label);
+        let mut name = format!("{} {}", tab.session.protocol.icon(), label);
+        if self.multiexec && tab.in_group {
+            name = format!("⚡ {name}");
+        }
         if tab.term.is_exited() {
             RichText::new(name).color(Color32::GRAY).italics().into()
         } else {
@@ -1128,6 +1211,7 @@ impl TabViewer for Viewer<'_> {
             }
         }
         let s = self.settings;
+        let rect = ui.available_rect_before_wrap();
         tab.term.ui(
             ui,
             s.font_size,
@@ -1135,9 +1219,20 @@ impl TabViewer for Viewer<'_> {
             s.copy_on_select,
             s.paste_on_right_click,
         );
+        if self.multiexec && tab.in_group {
+            // Make it obvious which terminals will receive keystrokes.
+            ui.painter().rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(2.0, Color32::from_rgb(230, 140, 20)),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
 
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Tab, path: NodePath) {
+        ui.checkbox(&mut tab.in_group, "Include in MultiExec");
+        ui.separator();
         if ui.button("Duplicate").clicked() {
             self.actions.push(Action::Open(tab.session.clone()));
             ui.close();
@@ -1160,11 +1255,7 @@ impl TabViewer for Viewer<'_> {
             tab.term.clear_scrollback();
             ui.close();
         }
-        ui.separator();
-        if ui.button("Close").clicked() {
-            self.actions.push(Action::Close(tab.id));
-            ui.close();
-        }
+        // egui_dock appends its own Eject and Close entries.
     }
 
     fn on_close(&mut self, tab: &mut Tab) -> OnCloseResponse {
@@ -1200,6 +1291,9 @@ impl eframe::App for App {
         }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        if self.multiexec {
+            egui::Panel::top("multiexec").show(ui, |ui| self.multiexec_bar(ui));
+        }
 
         egui::Panel::bottom("status").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1239,6 +1333,7 @@ impl eframe::App for App {
                     settings: &self.store.settings,
                     actions: &mut self.actions,
                     modal: &mut self.modal,
+                    multiexec: self.multiexec,
                 };
                 DockArea::new(&mut self.dock)
                     .style(style)
@@ -1246,6 +1341,7 @@ impl eframe::App for App {
                     .show_leaf_close_all_buttons(false)
                     .show_inside(ui, &mut viewer);
             });
+        self.mirror_input();
 
         self.modal_ui(ctx);
         if !self.actions.is_empty() {

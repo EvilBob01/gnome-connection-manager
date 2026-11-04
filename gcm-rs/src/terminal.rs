@@ -197,6 +197,16 @@ impl AutofillState {
     }
 }
 
+/// One piece of user input, kept in a form that can be replayed into other
+/// terminals (multi-exec). Keys are re-encoded for each target, so arrow keys
+/// work whether or not that terminal is in application-cursor mode.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Input {
+    Bytes(Vec<u8>),
+    Key(Key, Modifiers),
+    Paste(String),
+}
+
 pub struct Terminal {
     term: Arc<Mutex<Term<Listener>>>,
     writer: Writer,
@@ -208,6 +218,8 @@ pub struct Terminal {
     scheduled: Vec<(Instant, String)>,
     mouse_buttons: u8,
     focus_pending: bool,
+    /// User input since the app last called `take_input`.
+    recorded: Vec<Input>,
 }
 
 impl Terminal {
@@ -371,6 +383,7 @@ impl Terminal {
             scheduled: Vec::new(),
             mouse_buttons: 0,
             focus_pending: true,
+            recorded: Vec::new(),
         }
     }
 
@@ -394,7 +407,45 @@ impl Terminal {
             .push((Instant::now() + Duration::from_millis(delay_ms), text));
     }
 
-    pub fn paste(&self, text: &str) {
+    /// Apply user input and record it for multi-exec.
+    fn input(&mut self, input: Input) {
+        self.apply(&input);
+        self.recorded.push(input);
+    }
+
+    fn apply(&mut self, input: &Input) {
+        match input {
+            Input::Bytes(b) => self.write(b),
+            Input::Key(key, mods) => {
+                let mode = *self.term.lock().unwrap().mode();
+                if let Some(b) = key_bytes(*key, *mods, mode) {
+                    self.write(&b);
+                }
+            }
+            Input::Paste(text) => self.paste(text),
+        }
+        self.shared.autofill_armed.store(false, Ordering::Relaxed);
+        let mut term = self.term.lock().unwrap();
+        term.scroll_display(Scroll::Bottom);
+        term.selection = None;
+    }
+
+    /// Input typed into this terminal since the last call.
+    pub fn take_input(&mut self) -> Vec<Input> {
+        std::mem::take(&mut self.recorded)
+    }
+
+    /// Feed input typed elsewhere, without recording it again.
+    pub fn replay(&mut self, inputs: &[Input]) {
+        if self.is_exited() {
+            return;
+        }
+        for i in inputs {
+            self.apply(i);
+        }
+    }
+
+    fn paste(&self, text: &str) {
         let bracketed = self
             .term
             .lock()
@@ -663,7 +714,7 @@ impl Terminal {
             if response.secondary_clicked()
                 && let Some(text) = read_clipboard()
             {
-                self.paste(&text);
+                self.input(Input::Paste(text));
             }
         } else {
             response.context_menu(|ui| {
@@ -675,7 +726,7 @@ impl Terminal {
                 }
                 if ui.button("Paste").clicked() {
                     if let Some(text) = read_clipboard() {
-                        self.paste(&text);
+                        self.input(Input::Paste(text));
                     }
                     ui.close();
                 }
@@ -701,8 +752,6 @@ impl Terminal {
 
     fn handle_keys(&mut self, ui: &mut Ui) {
         let (events, mods) = ui.input(|i| (i.events.clone(), i.modifiers));
-        let mode = *self.term.lock().unwrap().mode();
-        let mut typed = false;
         for ev in events {
             match ev {
                 // egui-winit turns Ctrl+C/X/V into these; plain Ctrl must still reach the shell.
@@ -716,28 +765,24 @@ impl Terminal {
                         }
                         self.term.lock().unwrap().selection = None;
                     } else {
-                        self.write(b"\x03");
-                        typed = true;
+                        self.input(Input::Bytes(b"\x03".to_vec()));
                     }
                 }
                 Event::Cut => {
                     if !mods.shift {
-                        self.write(b"\x18");
-                        typed = true;
+                        self.input(Input::Bytes(b"\x18".to_vec()));
                     }
                 }
                 Event::Paste(text) => {
                     if mods.ctrl && !mods.shift {
-                        self.write(b"\x16");
+                        self.input(Input::Bytes(b"\x16".to_vec()));
                     } else {
-                        self.paste(&text);
+                        self.input(Input::Paste(text));
                     }
-                    typed = true;
                 }
                 // Alt+key is sent as ESC+key from the Key event; Ctrl+Alt is AltGr on Windows.
                 Event::Text(text) if !(mods.alt && !mods.ctrl) => {
-                    self.write(text.as_bytes());
-                    typed = true;
+                    self.input(Input::Bytes(text.into_bytes()));
                 }
                 Event::Key {
                     key,
@@ -760,8 +805,7 @@ impl Terminal {
                     }
                     if key == Key::Insert && modifiers.shift && !modifiers.ctrl {
                         if let Some(text) = read_clipboard() {
-                            self.paste(&text);
-                            typed = true;
+                            self.input(Input::Paste(text));
                         }
                         continue;
                     }
@@ -771,19 +815,13 @@ impl Terminal {
                         }
                         continue;
                     }
-                    if let Some(bytes) = key_bytes(key, modifiers, mode) {
-                        self.write(&bytes);
-                        typed = true;
+                    let mode = *self.term.lock().unwrap().mode();
+                    if key_bytes(key, modifiers, mode).is_some() {
+                        self.input(Input::Key(key, modifiers));
                     }
                 }
                 _ => {}
             }
-        }
-        if typed {
-            self.shared.autofill_armed.store(false, Ordering::Relaxed);
-            let mut term = self.term.lock().unwrap();
-            term.scroll_display(Scroll::Bottom);
-            term.selection = None;
         }
     }
 
