@@ -1,0 +1,38 @@
+name: gcm-rs
+
+on:
+  push:
+    paths: ["gcm-rs/**", ".github/workflows/gcm-rs.yml"]
+  pull_request:
+    paths: ["gcm-rs/**", ".github/workflows/gcm-rs.yml"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bin: gcm
+          - os: windows-latest
+            bin: gcm.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: gcm-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gcm-rs
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gcm-${{ runner.os }}
+          path: gcm-rs/target/release/${{ matrix.bin }}

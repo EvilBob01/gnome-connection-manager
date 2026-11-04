@@ -1,6 +1,10 @@
 # Gnome Connection Manager or GCM
 
 Gnome Connection Manager or GCM is a tabbed ssh connection manager for gtk+ environments.
+
+> **New:** [`gcm-rs/`](gcm-rs/README.md) is a Rust rewrite with a MobaXterm-style interface. It runs on
+> Linux and Windows and supports SSH, Telnet, Serial, RDP, VNC and local shells. It can import your
+> existing `~/.gcm/gcm.conf`.
 Starting with version 1.2.0 it **only** supports python3 and GTK 3 so it should run fine on any modern desktop environment.
 
 If you can't update to python/gtk 3 and only have python2/gtk2, then keep using GCM version v1.1.0 from [kuthulu.com](http://kuthulu.com/gcm/download.html)
