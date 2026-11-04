@@ -318,11 +318,14 @@ struct FileFormat {
     settings: Settings,
     #[serde(default, rename = "session")]
     sessions: Vec<Session>,
+    #[serde(default, rename = "tunnel")]
+    tunnels: Vec<crate::tunnel::Tunnel>,
 }
 
 pub struct Store {
     pub settings: Settings,
     pub sessions: Vec<Session>,
+    pub tunnels: Vec<crate::tunnel::Tunnel>,
     path: PathBuf,
     key: [u8; 32],
 }
@@ -352,6 +355,7 @@ impl Store {
         let mut store = Store {
             settings: file.settings,
             sessions: file.sessions,
+            tunnels: file.tunnels,
             path,
             key,
         };
@@ -381,6 +385,7 @@ impl Store {
         let file = FileFormat {
             settings: self.settings.clone(),
             sessions: self.sessions.clone(),
+            tunnels: self.tunnels.clone(),
         };
         let text = toml::to_string_pretty(&file)?;
         // Write then rename so a crash never leaves a truncated config.

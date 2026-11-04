@@ -25,6 +25,10 @@ It lives next to the original Python app while it matures.
   desktop onto the window to upload them, and right-click for rename, delete or copy path. New folders and
   downloads go to your Downloads folder (configurable). It runs the system `sftp` client, so authentication
   works the same as in the SSH tab (see *SFTP* below).
+- **Tunnel manager**: the toolbar's *⇄ Tunnels* button opens a list of saved port forwards (local `-L`,
+  remote `-R`, SOCKS `-D`). Each runs through a saved SSH session on its own, without a terminal tab, and can
+  be started, stopped and set to start with gcm. A coloured dot shows its state: grey stopped, yellow
+  connecting, green up, red failed with ssh's error underneath. See *Tunnels* below.
 - **MultiExec**: the toolbar's *⚡ MultiExec* button sends whatever you type in one terminal to every
   terminal in the group, like MobaXterm's MultiExec or GCM's cluster mode. All tabs start in the group;
   right-click a tab and untick *Include in MultiExec* to leave one out. Grouped tabs show ⚡ and an
@@ -69,6 +73,20 @@ processes running as you can read.
 
 Folders can be downloaded and uploaded recursively. *Delete* removes files and **empty** folders only,
 because sftp has no recursive delete.
+
+## Tunnels
+
+Each tunnel runs `ssh -N -o ExitOnForwardFailure=yes` with the chosen session's host, port, user, key and
+`-o`/`-J`/`-F` options. That means a forward that can't be set up makes ssh exit with its own error message
+instead of hanging. Without a keep-alive in the session, `ServerAliveInterval=30` is added so a dead link
+shows up as failed. Passwords use the same askpass helper as SFTP.
+
+- A local or SOCKS tunnel counts as **up** once its port is listening. gcm checks whether the port is
+  free before starting, so a clash fails straight away. A remote tunnel counts as up once ssh has stayed
+  connected for three seconds.
+- Tunnels stop when gcm exits. That also holds if gcm is killed or crashes: on Linux the kernel signals
+  them (`PR_SET_PDEATHSIG`), and on Windows they run in a job object that closes with gcm.
+- The *Tunnels* field on an SSH session still works too. Those forwards live and die with that terminal tab.
 
 ## Command line
 
@@ -123,7 +141,6 @@ when no password is saved. Defaults:
 
 ## Not yet
 
-- Tunnel manager UI (tunnels currently live on each SSH session)
 - IME input inside terminal tabs
 - Per-session colours and session logging
 
@@ -134,8 +151,9 @@ when no password is saved. Defaults:
 | `src/main.rs` | Startup and command-line handling |
 | `src/app.rs` | Window, session tree, tabs, dialogs |
 | `src/terminal.rs` | Terminal widget: PTY/serial I/O, rendering, keyboard and mouse |
-| `src/sftp.rs` | SFTP browser: drives the system `sftp`, askpass helper, file table |
-| `src/launch.rs` | Session → command line (ssh/telnet args, RDP/VNC templates) |
+| `src/sftp.rs` | SFTP browser: drives the system `sftp`, file table |
+| `src/tunnel.rs` | Tunnel manager: saved forwards, `ssh -N` processes, status |
+| `src/launch.rs` | Session → command line (ssh/telnet args, RDP/VNC templates), askpass helper |
 | `src/config.rs` | Sessions, settings, TOML storage, password encryption |
 | `src/gcm_import.rs` | Reader for the original GCM config and its pyAES passwords |
 | `src/fonts.rs` | System fallback fonts |

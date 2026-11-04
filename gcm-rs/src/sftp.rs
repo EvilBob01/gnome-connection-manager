@@ -3,7 +3,7 @@
 //! Runs the system `sftp` client with piped stdin/stdout instead of linking
 //! an SSH library, so `~/.ssh/config`, keys, the agent and `known_hosts` apply
 //! exactly as in the SSH tab. A saved password reaches ssh through
-//! `SSH_ASKPASS`, which points back at this binary (see [`askpass`]).
+//! `SSH_ASKPASS`, which points back at this binary (see [`crate::launch::askpass`]).
 //!
 //! With stdin not a terminal, sftp echoes each command as `sftp> cmd` and
 //! line-buffers its output; every batch ends with `pwd`, whose reply marks
@@ -22,25 +22,6 @@ use eframe::egui::{self, Color32, Key, RichText, Sense, Ui};
 use egui_extras::{Column, TableBuilder};
 
 use crate::config::{Session, Settings};
-
-const ASKPASS_FLAG: &str = "GCM_ASKPASS";
-const ASKPASS_SECRET: &str = "GCM_ASKPASS_SECRET";
-
-/// Entry point when ssh runs this binary as its askpass helper. Answers
-/// password and passphrase prompts with the session's saved password and
-/// refuses anything else (host-key confirmations, one-time codes), which
-/// ssh treats as "no". Returns the process exit code.
-pub fn askpass() -> Option<i32> {
-    std::env::var_os(ASKPASS_FLAG)?;
-    let prompt = std::env::args().nth(1).unwrap_or_default().to_lowercase();
-    let secret = std::env::var(ASKPASS_SECRET).unwrap_or_default();
-    if !secret.is_empty() && (prompt.contains("password") || prompt.contains("passphrase")) {
-        println!("{secret}");
-        Some(0)
-    } else {
-        Some(1)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
@@ -112,29 +93,7 @@ pub fn sftp_args(s: &Session) -> Result<Vec<String>> {
     if s.port != 0 && s.port != 22 {
         args.extend(["-P".into(), s.port.to_string()]);
     }
-    if s.keepalive > 0 {
-        args.extend(["-o".into(), format!("ServerAliveInterval={}", s.keepalive)]);
-    }
-    if s.compression {
-        args.push("-C".into());
-    }
-    if !s.private_key.is_empty() {
-        args.extend(["-i".into(), s.private_key.clone()]);
-    }
-    let extra =
-        shlex::split(&s.extra_args).ok_or_else(|| anyhow!("cannot parse extra arguments"))?;
-    let mut it = extra.into_iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "-o" | "-F" | "-J" | "-i" => {
-                if let Some(v) = it.next() {
-                    args.extend([a, v]);
-                }
-            }
-            _ if a.starts_with("-o") && a.len() > 2 => args.push(a),
-            _ => {}
-        }
-    }
+    args.extend(crate::launch::ssh_common_args(s)?);
     let host = if s.host.contains(':') {
         format!("[{}]", s.host)
     } else {
@@ -381,7 +340,7 @@ fn worker(
     let mut first = match conn.batch(&[]) {
         Ok(_) => Some(Op::List(None)),
         Err(out) => {
-            send(Reply::Closed(explain(&out)));
+            send(Reply::Closed(crate::launch::explain_ssh_failure(&out)));
             None
         }
     };
@@ -396,7 +355,7 @@ fn worker(
                 send(Reply::Finished);
             }
             Err(out) => {
-                send(Reply::Closed(explain(&out)));
+                send(Reply::Closed(crate::launch::explain_ssh_failure(&out)));
                 break;
             }
         }
@@ -405,18 +364,6 @@ fn worker(
     if let Some(mut c) = child_slot.lock().unwrap().take() {
         let _ = c.kill();
         let _ = c.wait();
-    }
-}
-
-/// Turn sftp's last words into something actionable.
-fn explain(out: &str) -> String {
-    let out = out.trim();
-    if out.contains("Host key verification failed") {
-        format!("{out}\nConnect once in an SSH tab to accept the host key, then reconnect.")
-    } else if out.is_empty() {
-        "Connection closed".into()
-    } else {
-        out.to_string()
     }
 }
 
@@ -448,26 +395,9 @@ impl Browser {
         let label = format!("Connecting to {}…", session.host);
         match sftp_args(session) {
             Ok(args) => {
-                let mut cmd = Command::new(&settings.sftp_command);
+                let mut cmd =
+                    crate::launch::background_ssh(&settings.sftp_command, &session.password);
                 cmd.args(&args);
-                if let Ok(exe) = std::env::current_exe() {
-                    cmd.env("SSH_ASKPASS", exe)
-                        .env("SSH_ASKPASS_REQUIRE", "force")
-                        .env(ASKPASS_FLAG, "1");
-                    // OpenSSH before 8.4 only uses askpass when DISPLAY is set.
-                    if cfg!(unix) && std::env::var_os("DISPLAY").is_none() {
-                        cmd.env("DISPLAY", ":0");
-                    }
-                }
-                if !session.password.is_empty() {
-                    cmd.env(ASKPASS_SECRET, &session.password);
-                }
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                    cmd.creation_flags(CREATE_NO_WINDOW);
-                }
                 Self::spawn(ctx, cmd, label)
             }
             Err(e) => {

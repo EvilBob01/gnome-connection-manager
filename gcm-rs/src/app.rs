@@ -10,6 +10,7 @@ use crate::gcm_import;
 use crate::launch::{self, Launch};
 use crate::sftp::Browser;
 use crate::terminal::Terminal;
+use crate::tunnel::{Status as TunnelStatus, Tunnel, TunnelKind, TunnelManager};
 
 pub struct Tab {
     id: u64,
@@ -38,6 +39,11 @@ enum Modal {
     ConfirmClose(u64),
     ConfirmDelete(u64),
     ConfirmImport(Vec<Session>),
+    EditTunnel {
+        tunnel: Tunnel,
+        is_new: bool,
+    },
+    ConfirmDeleteTunnel(u64),
     About,
 }
 
@@ -56,6 +62,7 @@ pub struct App {
     sidebar_tab: SidebarTab,
     /// SFTP browsers by terminal tab id, created when first shown.
     browsers: std::collections::HashMap<u64, Browser>,
+    tunnels: TunnelManager,
     status: Option<(String, bool)>,
 }
 
@@ -63,6 +70,7 @@ pub struct App {
 enum SidebarTab {
     Sessions,
     Sftp,
+    Tunnels,
 }
 
 impl App {
@@ -85,8 +93,23 @@ impl App {
             multiexec_line: String::new(),
             sidebar_tab: SidebarTab::Sessions,
             browsers: Default::default(),
+            tunnels: TunnelManager::default(),
             status: None,
         };
+        for t in app
+            .store
+            .tunnels
+            .clone()
+            .into_iter()
+            .filter(|t| t.autostart)
+        {
+            if let Err(e) = app
+                .tunnels
+                .start(&t, &app.store.sessions, &app.store.settings)
+            {
+                app.error(format!("Tunnel {}: {e:#}", t.display_name()));
+            }
+        }
         if app.store.settings.open_local_on_startup {
             app.actions
                 .push(Action::Open(Session::new(Protocol::Local)));
@@ -311,6 +334,16 @@ impl App {
             if ui.add(big("⚙", "Settings")).clicked() {
                 self.modal = Some(Modal::Settings(self.store.settings.clone()));
             }
+            let tunnels_btn = egui::Button::new(RichText::new("⇄  Tunnels").size(14.0))
+                .selected(self.show_sidebar && self.sidebar_tab == SidebarTab::Tunnels);
+            if ui
+                .add(tunnels_btn)
+                .on_hover_text("SSH tunnel manager")
+                .clicked()
+            {
+                self.show_sidebar = true;
+                self.sidebar_tab = SidebarTab::Tunnels;
+            }
             let me = egui::Button::new(RichText::new("⚡  MultiExec").size(14.0))
                 .selected(self.multiexec);
             if ui
@@ -422,12 +455,176 @@ impl App {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Sessions, "☰ Sessions");
             ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Sftp, "📁 SFTP");
+            ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Tunnels, "⇄ Tunnels");
         });
         ui.separator();
         match self.sidebar_tab {
             SidebarTab::Sessions => self.sessions_ui(ui),
             SidebarTab::Sftp => self.sftp_ui(ui),
+            SidebarTab::Tunnels => self.tunnels_ui(ui),
         }
+    }
+
+    fn start_tunnel(&mut self, t: &Tunnel) {
+        if let Err(e) = self
+            .tunnels
+            .start(t, &self.store.sessions, &self.store.settings)
+        {
+            self.error(format!("Tunnel {}: {e:#}", t.display_name()));
+        }
+    }
+
+    /// Saved port forwards, each started and stopped on its own (MobaSSHTunnel).
+    fn tunnels_ui(&mut self, ui: &mut Ui) {
+        let has_ssh = self
+            .store
+            .sessions
+            .iter()
+            .any(|s| s.protocol == Protocol::Ssh);
+        ui.horizontal(|ui| {
+            ui.heading("Tunnels");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let add = ui
+                    .add_enabled(has_ssh, egui::Button::new("➕").small())
+                    .on_hover_text("New tunnel")
+                    .on_disabled_hover_text("Save an SSH session first; tunnels run through one");
+                if add.clicked() {
+                    let mut tunnel = Tunnel::new();
+                    if let Some(s) = self
+                        .store
+                        .sessions
+                        .iter()
+                        .find(|s| s.protocol == Protocol::Ssh)
+                    {
+                        tunnel.session_id = s.id;
+                    }
+                    self.modal = Some(Modal::EditTunnel {
+                        tunnel,
+                        is_new: true,
+                    });
+                }
+            });
+        });
+        if self.store.tunnels.is_empty() {
+            ui.label(
+                RichText::new(
+                    "Port forwards that run on their own, without a terminal tab. \
+                     Add one with ➕.",
+                )
+                .weak(),
+            );
+            return;
+        }
+        ui.horizontal(|ui| {
+            if ui.small_button("▶ Start all").clicked() {
+                for t in self.store.tunnels.clone() {
+                    if !self.tunnels.is_running(t.id) {
+                        self.start_tunnel(&t);
+                    }
+                }
+            }
+            if ui.small_button("■ Stop all").clicked() {
+                self.store
+                    .tunnels
+                    .iter()
+                    .for_each(|t| self.tunnels.stop(t.id));
+            }
+        });
+        ui.separator();
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false; 2])
+            .show(ui, |ui| {
+                for t in self.store.tunnels.clone() {
+                    let status = self.tunnels.status(t.id);
+                    let (dot, tip) = match &status {
+                        TunnelStatus::Stopped => (Color32::GRAY, "Stopped"),
+                        TunnelStatus::Starting => (Color32::from_rgb(230, 180, 0), "Connecting…"),
+                        TunnelStatus::Up => (Color32::from_rgb(40, 190, 90), "Up"),
+                        TunnelStatus::Failed(_) => (Color32::from_rgb(230, 80, 80), "Failed"),
+                    };
+                    let running = self.tunnels.is_running(t.id);
+                    let via = self
+                        .store
+                        .find(t.session_id)
+                        .map(|s| s.display_name())
+                        .unwrap_or_else(|| "missing session".into());
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("●").color(dot)).on_hover_text(tip);
+                        let toggle = ui
+                            .small_button(if running { "■" } else { "▶" })
+                            .on_hover_text(if running { "Stop" } else { "Start" });
+                        let name = ui
+                            .add(
+                                egui::Label::new(RichText::new(t.display_name()).strong())
+                                    .selectable(false)
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Double-click to start or stop; right-click for more");
+                        if toggle.clicked() || name.double_clicked() {
+                            if running {
+                                self.tunnels.stop(t.id);
+                            } else {
+                                self.start_tunnel(&t);
+                            }
+                        }
+                        name.context_menu(|ui| {
+                            if ui.button(if running { "Stop" } else { "Start" }).clicked() {
+                                if running {
+                                    self.tunnels.stop(t.id);
+                                } else {
+                                    self.start_tunnel(&t);
+                                }
+                                ui.close();
+                            }
+                            if ui.button("Edit…").clicked() {
+                                self.modal = Some(Modal::EditTunnel {
+                                    tunnel: t.clone(),
+                                    is_new: false,
+                                });
+                                ui.close();
+                            }
+                            if ui.button("Duplicate").clicked() {
+                                let mut copy = t.clone();
+                                copy.id = new_id();
+                                copy.name = format!("{} (copy)", t.display_name());
+                                self.store.tunnels.push(copy);
+                                self.save();
+                                ui.close();
+                            }
+                            if t.kind != TunnelKind::Remote
+                                && ui.button("Copy local address").clicked()
+                            {
+                                let host = if t.bind_address.is_empty() {
+                                    "localhost"
+                                } else {
+                                    &t.bind_address
+                                };
+                                ui.ctx().copy_text(format!("{host}:{}", t.listen_port));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Delete").clicked() {
+                                self.modal = Some(Modal::ConfirmDeleteTunnel(t.id));
+                                ui.close();
+                            }
+                        });
+                    });
+                    ui.label(
+                        RichText::new(format!("{}  via {via}", t.summary()))
+                            .small()
+                            .weak(),
+                    );
+                    if let TunnelStatus::Failed(msg) = &status {
+                        ui.label(
+                            RichText::new(msg)
+                                .small()
+                                .color(Color32::from_rgb(230, 80, 80)),
+                        );
+                    }
+                    ui.add_space(4.0);
+                }
+            });
     }
 
     /// File browser for the SSH session in the focused tab, like MobaXterm's
@@ -816,6 +1013,78 @@ impl App {
                     self.info(format!("Imported {n} session(s)"));
                 }
             }
+            Modal::EditTunnel { tunnel, is_new } => {
+                let title = if *is_new { "New tunnel" } else { "Edit tunnel" };
+                let ssh: Vec<(u64, String)> = self
+                    .store
+                    .sessions
+                    .iter()
+                    .filter(|s| s.protocol == Protocol::Ssh)
+                    .map(|s| (s.id, s.display_name()))
+                    .collect();
+                egui::Window::new(title)
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .min_width(500.0)
+                    .show(ctx, |ui| {
+                        tunnel_form(ui, tunnel, &ssh);
+                        ui.separator();
+                        let problem = tunnel.validate().err().map(|e| e.to_string());
+                        if let Some(p) = &problem {
+                            ui.label(RichText::new(p).small().weak());
+                        }
+                        ui.horizontal(|ui| {
+                            let ok = problem.is_none();
+                            let save = ui.add_enabled(ok, egui::Button::new("Save")).clicked();
+                            let start = ui
+                                .add_enabled(ok, egui::Button::new("Save and start"))
+                                .clicked();
+                            if save || start {
+                                tunnel.dest_host = tunnel.dest_host.trim().to_string();
+                                let was_running = self.tunnels.is_running(tunnel.id);
+                                match self.store.tunnels.iter_mut().find(|t| t.id == tunnel.id) {
+                                    Some(existing) => *existing = tunnel.clone(),
+                                    None => self.store.tunnels.push(tunnel.clone()),
+                                }
+                                self.save();
+                                if start || was_running {
+                                    let t = tunnel.clone();
+                                    self.start_tunnel(&t);
+                                }
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked()
+                                || ui.input(|i| i.key_pressed(Key::Escape))
+                            {
+                                keep = false;
+                            }
+                        });
+                    });
+            }
+            Modal::ConfirmDeleteTunnel(id) => {
+                let id = *id;
+                let name = self
+                    .store
+                    .tunnels
+                    .iter()
+                    .find(|t| t.id == id)
+                    .map(|t| t.display_name())
+                    .unwrap_or_default();
+                let mut delete = false;
+                confirm(
+                    ctx,
+                    "Delete tunnel",
+                    &format!("Delete tunnel \"{name}\"?"),
+                    &mut keep,
+                    || delete = true,
+                );
+                if delete {
+                    self.tunnels.stop(id);
+                    self.store.tunnels.retain(|t| t.id != id);
+                    self.save();
+                }
+            }
             Modal::About => {
                 egui::Window::new("About")
                     .collapsible(false)
@@ -1083,6 +1352,101 @@ fn session_form(ui: &mut Ui, s: &mut Session, folders: &[String]) {
         });
 }
 
+fn tunnel_form(ui: &mut Ui, t: &mut Tunnel, ssh_sessions: &[(u64, String)]) {
+    let port_edit = |ui: &mut Ui, port: &mut u16| {
+        let mut text = if *port == 0 {
+            String::new()
+        } else {
+            port.to_string()
+        };
+        if ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(60.0))
+            .changed()
+        {
+            *port = text.trim().parse().unwrap_or(0);
+        }
+    };
+    egui::Grid::new("tunnel_form")
+        .num_columns(2)
+        .spacing([12.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut t.name).hint_text("e.g. Postgres on prod"));
+            ui.end_row();
+
+            ui.label("Through");
+            let current = ssh_sessions
+                .iter()
+                .find(|(id, _)| *id == t.session_id)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_else(|| "choose an SSH session".into());
+            egui::ComboBox::from_id_salt("tunnel_session")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (id, name) in ssh_sessions {
+                        ui.selectable_value(&mut t.session_id, *id, name);
+                    }
+                });
+            ui.end_row();
+
+            ui.label("Type");
+            ui.vertical(|ui| {
+                for k in TunnelKind::ALL {
+                    ui.radio_value(&mut t.kind, k, k.label());
+                }
+            });
+            ui.end_row();
+
+            let (listen_label, bind_hint) = match t.kind {
+                TunnelKind::Remote => ("Port on server", "server default"),
+                _ => ("Local port", "localhost"),
+            };
+            ui.label(listen_label);
+            ui.horizontal(|ui| {
+                port_edit(ui, &mut t.listen_port);
+                ui.label("bind address");
+                ui.add(
+                    egui::TextEdit::singleline(&mut t.bind_address)
+                        .hint_text(bind_hint)
+                        .desired_width(120.0),
+                );
+            });
+            ui.end_row();
+
+            if t.kind != TunnelKind::Dynamic {
+                ui.label(if t.kind == TunnelKind::Local {
+                    "Destination (from server)"
+                } else {
+                    "Destination (from here)"
+                });
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut t.dest_host)
+                            .hint_text("host")
+                            .desired_width(160.0),
+                    );
+                    ui.label("port");
+                    port_edit(ui, &mut t.dest_port);
+                });
+                ui.end_row();
+            }
+
+            ui.label("");
+            ui.checkbox(&mut t.autostart, "Start when gcm starts");
+            ui.end_row();
+        });
+    let help = match t.kind {
+        TunnelKind::Local => {
+            "Connections to the local port are forwarded through the server to the destination."
+        }
+        TunnelKind::Remote => {
+            "Connections to the port on the server are forwarded back here, to the destination."
+        }
+        TunnelKind::Dynamic => "A SOCKS5 proxy on the local port; point a browser or tool at it.",
+    };
+    ui.label(RichText::new(help).small().weak());
+}
+
 fn settings_form(ui: &mut Ui, s: &mut Settings) {
     egui::Grid::new("settings_form")
         .num_columns(2)
@@ -1283,6 +1647,10 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         self.run_actions(ctx);
+        self.tunnels.poll();
+        if self.tunnels.running_count() > 0 {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
         // Drop browsers whose terminal tab has been closed.
         if !self.browsers.is_empty() {
             let live: std::collections::HashSet<u64> =
@@ -1299,6 +1667,15 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 let tabs = self.dock.iter_all_tabs().count();
                 ui.label(format!("{tabs} tab(s)"));
+                let (up, running) = (self.tunnels.up_count(), self.tunnels.running_count());
+                if running > 0 {
+                    ui.separator();
+                    let text = format!("⇄ {up}/{running} tunnel(s) up");
+                    if ui.link(text).clicked() {
+                        self.show_sidebar = true;
+                        self.sidebar_tab = SidebarTab::Tunnels;
+                    }
+                }
                 if let Some((msg, is_err)) = &self.status {
                     ui.separator();
                     let color = if *is_err {
@@ -1350,6 +1727,8 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Stop tunnels now rather than whenever the app is dropped.
+        self.tunnels = TunnelManager::default();
         self.save();
     }
 }

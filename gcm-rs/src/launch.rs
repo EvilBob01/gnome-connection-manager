@@ -131,6 +131,92 @@ pub fn build(s: &Session, settings: &Settings) -> Result<Launch> {
     }
 }
 
+/// ssh options shared by the terminal-less clients (sftp, tunnels): key,
+/// keep-alive, compression, and the `-o`/`-F`/`-J`/`-i` options from the
+/// session's extra arguments. Port and target are left to the caller, as
+/// sftp spells the port flag differently.
+pub fn ssh_common_args(s: &Session) -> Result<Vec<String>> {
+    let mut args = Vec::new();
+    if s.keepalive > 0 {
+        args.extend(["-o".into(), format!("ServerAliveInterval={}", s.keepalive)]);
+    }
+    if s.compression {
+        args.push("-C".into());
+    }
+    if !s.private_key.is_empty() {
+        args.extend(["-i".into(), s.private_key.clone()]);
+    }
+    let mut it = split_args(&s.extra_args)?.into_iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-o" | "-F" | "-J" | "-i" => {
+                if let Some(v) = it.next() {
+                    args.extend([a, v]);
+                }
+            }
+            _ if a.starts_with("-o") && a.len() > 2 => args.push(a),
+            _ => {}
+        }
+    }
+    Ok(args)
+}
+
+const ASKPASS_FLAG: &str = "GCM_ASKPASS";
+const ASKPASS_SECRET: &str = "GCM_ASKPASS_SECRET";
+
+/// Entry point when ssh runs this binary as its askpass helper. Answers
+/// password and passphrase prompts with the session's saved password and
+/// refuses anything else (host-key confirmations, one-time codes), which
+/// ssh treats as "no". Returns the process exit code.
+pub fn askpass() -> Option<i32> {
+    std::env::var_os(ASKPASS_FLAG)?;
+    let prompt = std::env::args().nth(1).unwrap_or_default().to_lowercase();
+    let secret = std::env::var(ASKPASS_SECRET).unwrap_or_default();
+    if !secret.is_empty() && (prompt.contains("password") || prompt.contains("passphrase")) {
+        println!("{secret}");
+        Some(0)
+    } else {
+        Some(1)
+    }
+}
+
+/// A command for an ssh-based program running without a terminal (sftp,
+/// tunnels). Prompts go to [`askpass`]; on Windows no console window opens.
+pub fn background_ssh(program: &str, password: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("SSH_ASKPASS", exe)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env(ASKPASS_FLAG, "1");
+        // OpenSSH before 8.4 only uses askpass when DISPLAY is set.
+        if cfg!(unix) && std::env::var_os("DISPLAY").is_none() {
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+    if !password.is_empty() {
+        cmd.env(ASKPASS_SECRET, password);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Turn ssh's last words into something actionable.
+pub fn explain_ssh_failure(out: &str) -> String {
+    let out = out.trim();
+    if out.contains("Host key verification failed") {
+        format!("{out}\nConnect once in an SSH tab to accept the host key, then try again.")
+    } else if out.is_empty() {
+        "Connection closed".into()
+    } else {
+        out.to_string()
+    }
+}
+
 pub fn default_shell() -> String {
     if cfg!(windows) {
         "powershell.exe".into()

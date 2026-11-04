@@ -7,6 +7,7 @@ mod gcm_import;
 mod launch;
 mod sftp;
 mod terminal;
+mod tunnel;
 
 const USAGE: &str = "usage: gcm [SESSION | [proto://][user@]host[:port]]...
 
@@ -14,7 +15,7 @@ Opens a tab for each argument: the name of a saved session, or an address
 in quick-connect form (ssh is the default protocol).";
 
 fn main() -> eframe::Result {
-    if let Some(code) = sftp::askpass() {
+    if let Some(code) = launch::askpass() {
         std::process::exit(code);
     }
     env_logger::init();
