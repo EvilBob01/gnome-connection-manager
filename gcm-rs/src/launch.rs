@@ -185,6 +185,18 @@ fn expand_template(template: &str, s: &Session) -> Result<(String, Vec<String>)>
     Ok((program, out))
 }
 
+/// Show a folder in the desktop's file manager.
+pub fn open_path(path: &std::path::Path) -> Result<()> {
+    let program = if cfg!(windows) {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    spawn_external(program, &[path.to_string_lossy().into_owned()])
+}
+
 pub fn spawn_external(program: &str, args: &[String]) -> Result<()> {
     std::process::Command::new(program)
         .args(args)

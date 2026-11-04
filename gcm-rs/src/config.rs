@@ -253,6 +253,9 @@ pub struct Settings {
     /// ssh binary; Windows 10+ ships OpenSSH as `ssh`.
     pub ssh_command: String,
     pub telnet_command: String,
+    pub sftp_command: String,
+    /// Where the SFTP browser saves downloads; empty means the system Downloads folder.
+    pub download_dir: String,
     /// Empty means `$SHELL` (Unix) or PowerShell (Windows).
     pub local_shell: String,
     /// External client templates. Placeholders: {host} {port} {user} {password}.
@@ -263,6 +266,17 @@ pub struct Settings {
     pub sidebar_width: f32,
     /// Folders the user collapsed in the session tree.
     pub collapsed: Vec<String>,
+}
+
+impl Settings {
+    pub fn download_dir(&self) -> PathBuf {
+        if !self.download_dir.is_empty() {
+            return PathBuf::from(&self.download_dir);
+        }
+        dirs::download_dir()
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
 }
 
 impl Default for Settings {
@@ -277,6 +291,8 @@ impl Default for Settings {
             open_local_on_startup: false,
             ssh_command: "ssh".into(),
             telnet_command: "telnet".into(),
+            sftp_command: "sftp".into(),
+            download_dir: String::new(),
             local_shell: String::new(),
             rdp_command: if cfg!(windows) {
                 "mstsc /v:{host}:{port}".into()

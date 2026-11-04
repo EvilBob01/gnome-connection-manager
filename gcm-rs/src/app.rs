@@ -8,6 +8,7 @@ use egui_dock::{DockArea, DockState, Node, NodePath, Split, Style, TabViewer};
 use crate::config::{FlowControl, Parity, Protocol, Session, Settings, Store, new_id};
 use crate::gcm_import;
 use crate::launch::{self, Launch};
+use crate::sftp::Browser;
 use crate::terminal::Terminal;
 
 pub struct Tab {
@@ -46,7 +47,16 @@ pub struct App {
     quick: String,
     filter: String,
     show_sidebar: bool,
+    sidebar_tab: SidebarTab,
+    /// SFTP browsers by terminal tab id, created when first shown.
+    browsers: std::collections::HashMap<u64, Browser>,
     status: Option<(String, bool)>,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum SidebarTab {
+    Sessions,
+    Sftp,
 }
 
 impl App {
@@ -65,6 +75,8 @@ impl App {
             quick: String::new(),
             filter: String::new(),
             show_sidebar: true,
+            sidebar_tab: SidebarTab::Sessions,
+            browsers: Default::default(),
             status: None,
         };
         if app.store.settings.open_local_on_startup {
@@ -328,6 +340,67 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Sessions, "☰ Sessions");
+            ui.selectable_value(&mut self.sidebar_tab, SidebarTab::Sftp, "📁 SFTP");
+        });
+        ui.separator();
+        match self.sidebar_tab {
+            SidebarTab::Sessions => self.sessions_ui(ui),
+            SidebarTab::Sftp => self.sftp_ui(ui),
+        }
+    }
+
+    /// File browser for the SSH session in the focused tab, like MobaXterm's
+    /// SFTP pane. It opens its own connection with the system sftp client.
+    fn sftp_ui(&mut self, ui: &mut Ui) {
+        let active = self
+            .dock
+            .find_active_focused()
+            .map(|(_, tab)| (tab.id, tab.session.clone()));
+        let Some((id, session)) = active.filter(|(_, s)| s.protocol == Protocol::Ssh) else {
+            ui.label(RichText::new("Select an SSH tab to browse its files.").weak());
+            return;
+        };
+        ui.label(
+            RichText::new(format!(
+                "{} {}",
+                Protocol::Ssh.icon(),
+                session.display_name()
+            ))
+            .strong(),
+        );
+        let settings = &self.store.settings;
+        let browser = self
+            .browsers
+            .entry(id)
+            .or_insert_with(|| Browser::connect(ui.ctx(), &session, settings));
+
+        // Files dropped on the window go to the current remote folder.
+        let dropped: Vec<std::path::PathBuf> = ui.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if !dropped.is_empty() && !browser.is_closed() {
+            browser.upload(dropped);
+        }
+        if ui.input(|i| !i.raw.hovered_files.is_empty()) {
+            ui.label(RichText::new("Drop to upload here").color(ui.visuals().hyperlink_color));
+        }
+
+        let download_dir = settings.download_dir();
+        if browser.ui(ui, &download_dir) {
+            self.browsers.insert(
+                id,
+                Browser::connect(ui.ctx(), &session, &self.store.settings),
+            );
+        }
+    }
+
+    fn sessions_ui(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.heading("Sessions");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -977,6 +1050,15 @@ fn settings_form(ui: &mut Ui, s: &mut Settings) {
             ui.label("Telnet command");
             ui.text_edit_singleline(&mut s.telnet_command);
             ui.end_row();
+            ui.label("SFTP command");
+            ui.text_edit_singleline(&mut s.sftp_command);
+            ui.end_row();
+            ui.label("Download folder");
+            let default_dl = dirs::download_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_default();
+            ui.add(egui::TextEdit::singleline(&mut s.download_dir).hint_text(default_dl));
+            ui.end_row();
             ui.label("Local shell");
             ui.add(
                 egui::TextEdit::singleline(&mut s.local_shell).hint_text(launch::default_shell()),
@@ -1110,6 +1192,12 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
         self.run_actions(ctx);
+        // Drop browsers whose terminal tab has been closed.
+        if !self.browsers.is_empty() {
+            let live: std::collections::HashSet<u64> =
+                self.dock.iter_all_tabs().map(|(_, t)| t.id).collect();
+            self.browsers.retain(|id, _| live.contains(id));
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
 

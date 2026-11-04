@@ -20,6 +20,11 @@ It lives next to the original Python app while it matures.
     bits and flow control. The device field lists the ports it finds.
   - **RDP / VNC**: starts your normal client from a command template (see *Settings*).
   - **Local shell**: `$SHELL` on Linux, PowerShell on Windows, or any program you name.
+- **SFTP side browser**: the sidebar's *SFTP* tab shows the files of the SSH session in the focused tab.
+  Double-click to open a folder or download a file, Ctrl+click to select several, drop files from your
+  desktop onto the window to upload them, and right-click for rename, delete or copy path. New folders and
+  downloads go to your Downloads folder (configurable). It runs the system `sftp` client, so authentication
+  works the same as in the SSH tab (see *SFTP* below).
 - **Quick connect** in the toolbar: `user@host:2222`, `telnet://router`, `rdp://winbox`,
   `serial://COM3:9600`.
 - **Password autofill**: replaces `ssh.expect`. A saved password is typed when the server first prints
@@ -43,6 +48,21 @@ It lives next to the original Python app while it matures.
 
 On Windows `Ctrl+C` copies when text is selected and sends an interrupt otherwise, as Windows Terminal
 does. On Linux it always sends an interrupt.
+
+## SFTP
+
+The browser opens a second connection with your system `sftp` (it ships with OpenSSH on Linux and on
+Windows 10/11), using the session's host, port, user, key, keep-alive, compression and any `-o`/`-J`/`-F`
+options from *Extra arguments*. Keys, the agent, `~/.ssh/config` and `known_hosts` apply as usual.
+
+A saved password is handed to ssh through `SSH_ASKPASS`, which points back at `gcm` itself. That helper
+answers only password and passphrase prompts. It refuses anything else, including new host keys and
+one-time codes, so if a host is new, connect once in an SSH tab to accept its key, then press *Reconnect*
+in the SFTP pane. The password reaches the helper through the `sftp` process's environment, which other
+processes running as you can read.
+
+Folders can be downloaded and uploaded recursively. *Delete* removes files and **empty** folders only,
+because sftp has no recursive delete.
 
 ## Command line
 
@@ -97,7 +117,6 @@ when no password is saved. Defaults:
 
 ## Not yet
 
-- SFTP side browser
 - Multi-exec (typing into several tabs at once, GCM's "cluster" mode)
 - Tunnel manager UI (tunnels currently live on each SSH session)
 - IME input inside terminal tabs
@@ -110,10 +129,13 @@ when no password is saved. Defaults:
 | `src/main.rs` | Startup and command-line handling |
 | `src/app.rs` | Window, session tree, tabs, dialogs |
 | `src/terminal.rs` | Terminal widget: PTY/serial I/O, rendering, keyboard and mouse |
+| `src/sftp.rs` | SFTP browser: drives the system `sftp`, askpass helper, file table |
 | `src/launch.rs` | Session → command line (ssh/telnet args, RDP/VNC templates) |
 | `src/config.rs` | Sessions, settings, TOML storage, password encryption |
 | `src/gcm_import.rs` | Reader for the original GCM config and its pyAES passwords |
 | `src/fonts.rs` | System fallback fonts |
 
 `cargo test` covers argument building, quick-connect parsing, key encoding, autofill, config round-trips
-and GCM import (checked against output from the original `pyAES.py`).
+and GCM import (checked against output from the original `pyAES.py`). Where OpenSSH's `sftp-server` is
+installed it also runs a full SFTP session (list, cd, upload, download, mkdir, rename, delete, errors)
+against a local server, with no network involved.
