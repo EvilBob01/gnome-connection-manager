@@ -74,6 +74,13 @@ pub fn import(path: &Path) -> Result<Vec<Session>> {
         s.x11 = flag("x11");
         s.agent_forward = flag("agent");
         s.compression = flag("compression");
+        s.log = flag("log");
+        let color = |k: &str| crate::config::parse_color(&get(k)).map(crate::config::color_hex);
+        // GCM only applied colours when both were set.
+        if let (Some(fg), Some(bg)) = (color("font-color"), color("back-color")) {
+            s.fg_color = fg;
+            s.bg_color = bg;
+        }
         s.tunnels = get("tunnel")
             .split(',')
             .filter(|t| !t.is_empty())
@@ -297,7 +304,7 @@ mod tests {
             dir.join("gcm.conf"),
             "[options]\nversion = 1.2.0\n\n[host 1]\ngroup = prod/web\nname = web1\nhost = 10.0.0.5\nuser = admin\n\
              pass = \nport = 2222\ntunnel = 8080:localhost:80,1080:*:*\ntype = ssh\ncommands = uptime\\nw\n\
-             keepalive = 30\nx11 = True\nagent = False\n\n[host 2]\ngroup = \nname = local\nhost = \nuser = \npass = \n",
+             keepalive = 30\nx11 = True\nagent = False\nfont-color = #fff\nback-color = rgb(0,0,64)\nlog = True\n\n[host 2]\ngroup = \nname = local\nhost = \nuser = \npass = \n",
         )
         .unwrap();
         let hosts = import(&dir.join("gcm.conf")).unwrap();
@@ -309,6 +316,10 @@ mod tests {
         assert_eq!(web.tunnels, vec!["L 8080:localhost:80", "D 1080"]);
         assert_eq!(web.commands, "uptime\nw");
         assert!(web.x11 && !web.agent_forward);
+        assert_eq!(
+            (web.fg_color.as_str(), web.bg_color.as_str(), web.log),
+            ("#ffffff", "#000040", true)
+        );
         assert_eq!(
             hosts.iter().find(|h| h.name == "local").unwrap().protocol,
             Protocol::Local

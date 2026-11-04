@@ -15,6 +15,7 @@ eframe = { version = "0.36", default-features = false, features = ["accesskit", 
 arboard = "3"
 egui_extras = "0.36"
 rfd = "0.17"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 egui_dock = "0.21"
 alacritty_terminal = "0.26"
 portable-pty = "0.9"

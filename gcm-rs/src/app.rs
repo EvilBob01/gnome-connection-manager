@@ -21,6 +21,8 @@ pub struct Tab {
 }
 
 enum Action {
+    /// Show a message in the status bar (true = error).
+    Notify(String, bool),
     Open(Session),
     Split(Session, NodePath, Split),
     Reconnect(u64),
@@ -169,6 +171,15 @@ impl App {
         });
         match result {
             Ok(Some(mut term)) => {
+                term.set_colors(
+                    crate::config::parse_color(&session.fg_color),
+                    crate::config::parse_color(&session.bg_color),
+                );
+                if session.log
+                    && let Err(e) = term.start_log(&settings.log_dir(), &session.display_name())
+                {
+                    self.error(format!("Cannot start log: {e:#}"));
+                }
                 for (delay, text) in
                     launch::command_schedule(&session.commands, session.protocol == Protocol::Local)
                 {
@@ -200,6 +211,8 @@ impl App {
     fn run_actions(&mut self, ctx: &egui::Context) {
         for action in std::mem::take(&mut self.actions) {
             match action {
+                Action::Notify(msg, true) => self.error(msg),
+                Action::Notify(msg, false) => self.info(msg),
                 Action::Open(session) => {
                     if let Some(tab) = self.connect(ctx, session) {
                         self.dock.push_to_focused_leaf(tab);
@@ -265,6 +278,16 @@ impl App {
                 ui.separator();
                 if ui.button("Import from GNOME Connection Manager…").clicked() {
                     self.import_gcm();
+                }
+                if ui.button("Open log folder").clicked() {
+                    let dir = self.store.settings.log_dir();
+                    if let Err(e) = std::fs::create_dir_all(&dir)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|_| launch::open_path(&dir))
+                    {
+                        self.error(format!("{}: {e:#}", dir.display()));
+                    }
+                    ui.close();
                 }
                 ui.separator();
                 if ui.button("Quit").clicked() {
@@ -1346,6 +1369,17 @@ fn session_form(ui: &mut Ui, s: &mut Session, folders: &[String]) {
                 );
                 ui.end_row();
             }
+            if !s.protocol.is_external() {
+                ui.label("Colours");
+                ui.horizontal(|ui| {
+                    color_choice(ui, &mut s.fg_color, "Text", [0xd4, 0xd4, 0xd4]);
+                    color_choice(ui, &mut s.bg_color, "Background", [0x1e, 0x1e, 0x1e]);
+                });
+                ui.end_row();
+                ui.label("Logging");
+                ui.checkbox(&mut s.log, "Save terminal output to a log file");
+                ui.end_row();
+            }
             ui.label("Description");
             ui.text_edit_singleline(&mut s.description);
             ui.end_row();
@@ -1447,6 +1481,25 @@ fn tunnel_form(ui: &mut Ui, t: &mut Tunnel, ssh_sessions: &[(u64, String)]) {
     ui.label(RichText::new(help).small().weak());
 }
 
+/// A checkbox to override a colour plus its picker. `value` is `#rrggbb`,
+/// or empty for the theme's colour.
+fn color_choice(ui: &mut Ui, value: &mut String, label: &str, default: [u8; 3]) {
+    let mut custom = !value.is_empty();
+    if ui.checkbox(&mut custom, label).changed() {
+        *value = if custom {
+            crate::config::color_hex(default)
+        } else {
+            String::new()
+        };
+    }
+    if custom {
+        let mut rgb = crate::config::parse_color(value).unwrap_or(default);
+        if ui.color_edit_button_srgb(&mut rgb).changed() {
+            *value = crate::config::color_hex(rgb);
+        }
+    }
+}
+
 fn settings_form(ui: &mut Ui, s: &mut Settings) {
     egui::Grid::new("settings_form")
         .num_columns(2)
@@ -1502,6 +1555,13 @@ fn settings_form(ui: &mut Ui, s: &mut Settings) {
                 .unwrap_or_default();
             ui.add(egui::TextEdit::singleline(&mut s.download_dir).hint_text(default_dl));
             ui.end_row();
+            ui.label("Log folder");
+            let default_logs = crate::config::config_dir()
+                .join("logs")
+                .display()
+                .to_string();
+            ui.add(egui::TextEdit::singleline(&mut s.log_dir).hint_text(default_logs));
+            ui.end_row();
             ui.label("Local shell");
             ui.add(
                 egui::TextEdit::singleline(&mut s.local_shell).hint_text(launch::default_shell()),
@@ -1544,6 +1604,9 @@ impl TabViewer for Viewer<'_> {
             _ => tab.session.display_name(),
         };
         let mut name = format!("{} {}", tab.session.protocol.icon(), label);
+        if tab.term.log_path().is_some() {
+            name = format!("● {name}");
+        }
         if self.multiexec && tab.in_group {
             name = format!("⚡ {name}");
         }
@@ -1596,6 +1659,44 @@ impl TabViewer for Viewer<'_> {
 
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Tab, path: NodePath) {
         ui.checkbox(&mut tab.in_group, "Include in MultiExec");
+        match tab.term.log_path() {
+            Some(path) => {
+                if ui
+                    .button("Stop logging")
+                    .on_hover_text(path.display().to_string())
+                    .clicked()
+                {
+                    tab.term.stop_log();
+                    self.actions.push(Action::Notify(
+                        format!("Log saved: {}", path.display()),
+                        false,
+                    ));
+                    ui.close();
+                }
+            }
+            None => {
+                if ui.button("Start logging").clicked() {
+                    let dir = self.settings.log_dir();
+                    let note = match tab.term.start_log(&dir, &tab.session.display_name()) {
+                        Ok(path) => Action::Notify(format!("Logging to {}", path.display()), false),
+                        Err(e) => Action::Notify(format!("Cannot start log: {e:#}"), true),
+                    };
+                    self.actions.push(note);
+                    ui.close();
+                }
+            }
+        }
+        if ui.button("Open log folder").clicked() {
+            let dir = self.settings.log_dir();
+            if let Err(e) = std::fs::create_dir_all(&dir)
+                .map_err(anyhow::Error::from)
+                .and_then(|_| launch::open_path(&dir))
+            {
+                self.actions
+                    .push(Action::Notify(format!("{}: {e:#}", dir.display()), true));
+            }
+            ui.close();
+        }
         ui.separator();
         if ui.button("Duplicate").clicked() {
             self.actions.push(Action::Open(tab.session.clone()));

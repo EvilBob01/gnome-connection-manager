@@ -147,6 +147,11 @@ pub struct Session {
     /// SSH forwards, one per entry: `L 8080:localhost:80`, `R 9000:localhost:9000`, `D 1080`.
     pub tunnels: Vec<String>,
     pub serial: SerialSettings,
+    /// Terminal text and background colours as `#rrggbb`; empty means the theme's.
+    pub fg_color: String,
+    pub bg_color: String,
+    /// Save the terminal output of this session to a log file.
+    pub log: bool,
 }
 
 impl Session {
@@ -236,6 +241,43 @@ impl Session {
     }
 }
 
+/// Parse a colour as `#rgb`, `#rrggbb`, `#rrrgggbbb`, `#rrrrggggbbbb` (what
+/// GTK accepts, and so what GCM saved) or `rgb(r,g,b)` / `rgba(r,g,b,a)`.
+pub fn parse_color(s: &str) -> Option<[u8; 3]> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        let n = hex.len();
+        if !matches!(n, 3 | 6 | 9 | 12) || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let k = n / 3;
+        let max = (1u64 << (4 * k)) - 1;
+        let mut out = [0u8; 3];
+        for (i, c) in out.iter_mut().enumerate() {
+            let v = u64::from_str_radix(&hex[i * k..(i + 1) * k], 16).ok()?;
+            *c = ((v * 255 + max / 2) / max) as u8;
+        }
+        return Some(out);
+    }
+    let inner = s
+        .strip_prefix("rgba(")
+        .or_else(|| s.strip_prefix("rgb("))?
+        .strip_suffix(')')?;
+    let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let mut out = [0u8; 3];
+    for (c, p) in out.iter_mut().zip(&parts) {
+        *c = p.parse().ok()?;
+    }
+    Some(out)
+}
+
+pub fn color_hex([r, g, b]: [u8; 3]) -> String {
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
 pub fn new_id() -> u64 {
     rand::rng().next_u64()
 }
@@ -263,12 +305,22 @@ pub struct Settings {
     pub vnc_command: String,
     /// Optional monospace font file for terminals (e.g. Consolas, JetBrains Mono).
     pub font_path: String,
+    /// Where session logs go; empty means `logs` in the config folder.
+    pub log_dir: String,
     pub sidebar_width: f32,
     /// Folders the user collapsed in the session tree.
     pub collapsed: Vec<String>,
 }
 
 impl Settings {
+    pub fn log_dir(&self) -> PathBuf {
+        if self.log_dir.is_empty() {
+            config_dir().join("logs")
+        } else {
+            PathBuf::from(&self.log_dir)
+        }
+    }
+
     pub fn download_dir(&self) -> PathBuf {
         if !self.download_dir.is_empty() {
             return PathBuf::from(&self.download_dir);
@@ -306,6 +358,7 @@ impl Default for Settings {
                 "vncviewer {host}::{port}".into()
             },
             font_path: String::new(),
+            log_dir: String::new(),
             sidebar_width: 240.0,
             collapsed: Vec::new(),
         }
@@ -501,6 +554,19 @@ mod tests {
         let again = Store::load(&dir).unwrap();
         assert_eq!(again.sessions[0].password, "s3cret ü");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn colors() {
+        assert_eq!(parse_color("#ff8000"), Some([255, 128, 0]));
+        assert_eq!(parse_color("#f80"), Some([255, 136, 0]));
+        assert_eq!(parse_color("#ffff00000000"), Some([255, 0, 0]));
+        assert_eq!(parse_color("rgb(1, 2, 3)"), Some([1, 2, 3]));
+        assert_eq!(parse_color("rgba(1,2,3,0.5)"), Some([1, 2, 3]));
+        // GCM's unpadded "%x%x%x" output for (255, 0, 128) is ambiguous; GTK rejected it too.
+        assert_eq!(parse_color("#ff080"), None);
+        assert_eq!(parse_color(""), None);
+        assert_eq!(color_hex([255, 128, 0]), "#ff8000");
     }
 
     #[test]

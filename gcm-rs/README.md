@@ -29,6 +29,10 @@ It lives next to the original Python app while it matures.
   remote `-R`, SOCKS `-D`). Each runs through a saved SSH session on its own, without a terminal tab, and can
   be started, stopped and set to start with gcm. A coloured dot shows its state: grey stopped, yellow
   connecting, green up, red failed with ssh's error underneath. See *Tunnels* below.
+- **Per-session colours**: give a session its own text and background colour (*Colours* in the session
+  editor), e.g. a red background for production. Imported from GCM's `font-color`/`back-color`.
+- **Session logging**: tick *Save terminal output to a log file* on a session, or use *Start logging* /
+  *Stop logging* in any tab's right-click menu. A ● in the tab title shows it's on. See *Logs* below.
 - **MultiExec**: the toolbar's *⚡ MultiExec* button sends whatever you type in one terminal to every
   terminal in the group, like MobaXterm's MultiExec or GCM's cluster mode. All tabs start in the group;
   right-click a tab and untick *Include in MultiExec* to leave one out. Grouped tabs show ⚡ and an
@@ -88,6 +92,18 @@ shows up as failed. Passwords use the same askpass helper as SFTP.
   them (`PR_SET_PDEATHSIG`), and on Windows they run in a job object that closes with gcm.
 - The *Tunnels* field on an SSH session still works too. Those forwards live and die with that terminal tab.
 
+## Logs
+
+Each session start writes `<session>_<YYYYmmdd_HHMMSS>.log` to the log folder
+(`~/.config/gcm-rs/logs`, `%APPDATA%\gcm-rs\logs`, or *Log folder* in Settings). *Session → Open log
+folder* opens it.
+
+- The file is plain text with colours and cursor movement removed. A progress counter that redraws a
+  line keeps only its final state, and backspaced characters disappear.
+- Each file starts with a header line and, when logging stops normally, ends with a closing line.
+- The log holds whatever was on screen, so on Linux and macOS it is readable only by you (mode 0600).
+  Passwords typed at a prompt aren't echoed, so they don't appear in it.
+
 ## Command line
 
 ```
@@ -142,7 +158,6 @@ when no password is saved. Defaults:
 ## Not yet
 
 - IME input inside terminal tabs
-- Per-session colours and session logging
 
 ## Code layout
 
@@ -153,6 +168,7 @@ when no password is saved. Defaults:
 | `src/terminal.rs` | Terminal widget: PTY/serial I/O, rendering, keyboard and mouse |
 | `src/sftp.rs` | SFTP browser: drives the system `sftp`, file table |
 | `src/tunnel.rs` | Tunnel manager: saved forwards, `ssh -N` processes, status |
+| `src/sessionlog.rs` | Session logs: escape-code stripping, log files |
 | `src/launch.rs` | Session → command line (ssh/telnet args, RDP/VNC templates), askpass helper |
 | `src/config.rs` | Sessions, settings, TOML storage, password encryption |
 | `src/gcm_import.rs` | Reader for the original GCM config and its pyAES passwords |

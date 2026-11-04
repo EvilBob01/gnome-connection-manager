@@ -63,6 +63,22 @@ struct Shared {
     /// Cleared on the first keystroke: after that a "Password:" prompt is
     /// the user's business, not something to answer with the saved password.
     autofill_armed: AtomicBool,
+    /// Per-session text and background colours overriding the theme.
+    colors: Mutex<(Option<Rgb>, Option<Rgb>)>,
+    /// Output is copied here while the session is being logged.
+    log: Mutex<Option<crate::sessionlog::Logger>>,
+}
+
+impl Shared {
+    /// The session's colour for the foreground, background or cursor slot.
+    fn color_override(&self, index: usize) -> Option<Rgb> {
+        let (fg, bg) = *self.colors.lock().unwrap();
+        match index {
+            i if i == NamedColor::Foreground as usize || i == NamedColor::Cursor as usize => fg,
+            i if i == NamedColor::Background as usize => bg,
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -80,7 +96,9 @@ impl EventListener for Listener {
             TermEvent::ResetTitle => *self.shared.title.lock().unwrap() = None,
             TermEvent::ClipboardStore(_, text) => self.ctx.copy_text(text),
             TermEvent::ColorRequest(index, reply) => {
-                let rgb = palette_rgb(index, self.shared.dark.load(Ordering::Relaxed));
+                let rgb = self.shared.color_override(index).unwrap_or_else(|| {
+                    palette_rgb(index, self.shared.dark.load(Ordering::Relaxed))
+                });
                 write_all(&self.writer, reply(rgb).as_bytes());
             }
             TermEvent::TextAreaSizeRequest(reply) => {
@@ -362,6 +380,9 @@ impl Terminal {
                     Ok(0) => break,
                     Ok(n) => {
                         parser.advance(&mut *t.lock().unwrap(), &buf[..n]);
+                        if let Some(log) = sh.log.lock().unwrap().as_mut() {
+                            log.write(&buf[..n]);
+                        }
                         autofill.feed(&buf[..n], &w, &sh.autofill_armed);
                         c.request_repaint();
                     }
@@ -458,6 +479,38 @@ impl Terminal {
         } else {
             self.write(text.as_bytes());
         }
+    }
+
+    /// Use these colours instead of the theme's foreground and background.
+    pub fn set_colors(&mut self, fg: Option<[u8; 3]>, bg: Option<[u8; 3]>) {
+        let rgb = |c: [u8; 3]| Rgb {
+            r: c[0],
+            g: c[1],
+            b: c[2],
+        };
+        *self.shared.colors.lock().unwrap() = (fg.map(rgb), bg.map(rgb));
+    }
+
+    /// Start writing output to a new log file in `dir`; returns its path.
+    pub fn start_log(&mut self, dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf> {
+        let logger = crate::sessionlog::Logger::create(dir, name)?;
+        let path = logger.path().to_path_buf();
+        *self.shared.log.lock().unwrap() = Some(logger);
+        Ok(path)
+    }
+
+    pub fn stop_log(&mut self) {
+        self.shared.log.lock().unwrap().take();
+    }
+
+    /// The file being written, if logging.
+    pub fn log_path(&self) -> Option<std::path::PathBuf> {
+        self.shared
+            .log
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|l| l.path().to_path_buf())
     }
 
     /// Take keyboard focus on the next frame.
@@ -830,15 +883,17 @@ impl Terminal {
         let term = self.term.lock().unwrap();
         let content = term.renderable_content();
         let colors = content.colors;
+        let shared = &self.shared;
         let resolve = |c: AnsiColor| -> Color32 {
             let rgb = match c {
                 AnsiColor::Spec(rgb) => rgb,
                 AnsiColor::Indexed(i) => {
                     colors[i as usize].unwrap_or_else(|| palette_rgb(i as usize, dark))
                 }
-                AnsiColor::Named(n) => {
-                    colors[n as usize].unwrap_or_else(|| palette_rgb(n as usize, dark))
-                }
+                // Colours set by the program (OSC 10/11) win over the session's.
+                AnsiColor::Named(n) => colors[n as usize]
+                    .or_else(|| shared.color_override(n as usize))
+                    .unwrap_or_else(|| palette_rgb(n as usize, dark)),
             };
             Color32::from_rgb(rgb.r, rgb.g, rgb.b)
         };

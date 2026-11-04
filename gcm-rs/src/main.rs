@@ -5,6 +5,7 @@ mod config;
 mod fonts;
 mod gcm_import;
 mod launch;
+mod sessionlog;
 mod sftp;
 mod terminal;
 mod tunnel;
