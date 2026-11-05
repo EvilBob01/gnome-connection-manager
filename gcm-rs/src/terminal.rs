@@ -374,6 +374,7 @@ impl Terminal {
         ctx: &egui::Context,
         program: &str,
         args: &[String],
+        env: &[(String, String)],
         autofill: Autofill,
         scrollback: usize,
     ) -> Result<Self> {
@@ -393,6 +394,9 @@ impl Terminal {
         cmd.args(args);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
         if let Some(home) = dirs::home_dir() {
             cmd.cwd(home);
         }
@@ -585,6 +589,16 @@ impl Terminal {
         self.shared.title.lock().unwrap().clone()
     }
 
+    /// Exit as last observed, without polling the process.
+    pub fn has_exited(&self) -> bool {
+        self.shared.exited.load(Ordering::Relaxed)
+    }
+
+    /// Type text as if the user had (snippets): recorded for MultiExec.
+    pub fn send_text(&mut self, text: &str) {
+        self.input(Input::Bytes(text.as_bytes().to_vec()));
+    }
+
     pub fn is_exited(&mut self) -> bool {
         if !self.shared.exited.load(Ordering::Relaxed) && self.backend.exited() {
             self.shared.exited.store(true, Ordering::Relaxed);
@@ -704,6 +718,7 @@ impl Terminal {
     }
 
     /// Draw the terminal into all available space and handle its input.
+    /// Returns whether it has keyboard focus.
     pub fn ui(
         &mut self,
         ui: &mut Ui,
@@ -712,7 +727,7 @@ impl Terminal {
         copy_on_select: bool,
         paste_on_right_click: bool,
         ime: bool,
-    ) {
+    ) -> bool {
         self.shared.dark.store(dark, Ordering::Relaxed);
         let now = Instant::now();
         let (due, later): (Vec<_>, Vec<_>) =
@@ -795,6 +810,7 @@ impl Terminal {
             });
         }
         self.paint(ui, rect, cell, &font, dark, focused);
+        focused
     }
 
     /// Screen rectangle of the cell under the terminal cursor.
@@ -1561,14 +1577,17 @@ mod tests {
     #[test]
     fn input_method() {
         let ctx = egui::Context::default();
-        let mut term = Terminal::spawn_pty(&ctx, "cat", &[], Autofill::default(), 100).unwrap();
+        let mut term =
+            Terminal::spawn_pty(&ctx, "cat", &[], &[], Autofill::default(), 100).unwrap();
         let frame = |events: Vec<Event>, ime: bool, term: &mut Terminal| {
             let input = egui::RawInput {
                 events,
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
                 ..Default::default()
             };
-            let mut out = ctx.run_ui(input, |ui| term.ui(ui, 14.0, true, false, false, ime));
+            let mut out = ctx.run_ui(input, |ui| {
+                term.ui(ui, 14.0, true, false, false, ime);
+            });
             // No renderer here to hand font textures to.
             out.textures_delta.clear();
             out

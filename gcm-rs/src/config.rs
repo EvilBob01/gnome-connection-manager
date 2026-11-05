@@ -168,6 +168,15 @@ impl Session {
         }
     }
 
+    /// A copy safe to write outside the encrypted store (no password).
+    pub fn without_secrets(&self) -> Session {
+        Session {
+            password: String::new(),
+            password_enc: String::new(),
+            ..self.clone()
+        }
+    }
+
     pub fn effective_port(&self) -> u16 {
         if self.port == 0 {
             self.protocol.default_port()
@@ -358,6 +367,14 @@ pub struct Settings {
     pub log_dir: String,
     /// Input method (IME) for typing e.g. Chinese or Japanese into terminals.
     pub ime: ImeMode,
+    /// Reopen the tabs (and split layout) that were open when gcm-rs closed.
+    pub restore_tabs: bool,
+    /// Windows: the X display ssh forwards X11 to, and the X server to start
+    /// when none is running (empty: look for VcXsrv or Xming).
+    pub x_display: String,
+    pub x_server_command: String,
+    /// Changed keyboard shortcuts by command id, e.g. "close_tab" = "Ctrl+Shift+W".
+    pub shortcuts: std::collections::BTreeMap<String, String>,
     pub sidebar_width: f32,
     /// Folders the user collapsed in the session tree.
     pub collapsed: Vec<String>,
@@ -422,6 +439,10 @@ impl Default for Settings {
             font_path: String::new(),
             log_dir: String::new(),
             ime: ImeMode::Auto,
+            restore_tabs: false,
+            x_display: "localhost:0.0".into(),
+            x_server_command: String::new(),
+            shortcuts: Default::default(),
             sidebar_width: 240.0,
             collapsed: Vec::new(),
         }
@@ -436,14 +457,122 @@ struct FileFormat {
     sessions: Vec<Session>,
     #[serde(default, rename = "tunnel")]
     tunnels: Vec<crate::tunnel::Tunnel>,
+    #[serde(default, rename = "snippet")]
+    snippets: Vec<Snippet>,
+}
+
+/// A saved piece of text to type into terminals (MobaXterm's macros).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Snippet {
+    pub id: u64,
+    pub name: String,
+    /// Lines are sent with Enter between them.
+    pub text: String,
+    /// Press Enter after the last line too.
+    pub press_enter: bool,
+}
+
+impl Default for Snippet {
+    fn default() -> Self {
+        Snippet {
+            id: new_id(),
+            name: String::new(),
+            text: String::new(),
+            press_enter: true,
+        }
+    }
+}
+
+impl Snippet {
+    /// What to type: newlines become Enter (CR), plus a final Enter if asked.
+    pub fn keystrokes(&self) -> String {
+        let mut out = self.text.replace("\r\n", "\n").replace('\n', "\r");
+        if self.press_enter && !out.ends_with('\r') {
+            out.push('\r');
+        }
+        out
+    }
 }
 
 pub struct Store {
     pub settings: Settings,
     pub sessions: Vec<Session>,
     pub tunnels: Vec<crate::tunnel::Tunnel>,
+    pub snippets: Vec<Snippet>,
     path: PathBuf,
-    key: [u8; 32],
+    key_path: PathBuf,
+    /// None while a master password has not been entered yet.
+    key: Option<[u8; 32]>,
+    /// Set when a master password protects the key.
+    master: Option<Master>,
+}
+
+#[derive(Clone)]
+struct Master {
+    salt: [u8; 16],
+    /// MASTER_CHECK encrypted with the derived key, to recognise a wrong password.
+    check: String,
+}
+
+/// First line of a key file protected by a master password; an unprotected
+/// key file is just 32 random bytes.
+const MASTER_MAGIC: &[u8] = b"gcm-rs master v1\n";
+const MASTER_CHECK: &str = "gcm-rs master password check";
+
+enum KeyFile {
+    Plain([u8; 32]),
+    Master(Master),
+}
+
+fn read_key_file(path: &Path) -> Result<Option<KeyFile>> {
+    let Ok(bytes) = fs::read(path) else {
+        return Ok(None);
+    };
+    if let Some(rest) = bytes.strip_prefix(MASTER_MAGIC) {
+        let text = std::str::from_utf8(rest)?;
+        let (salt, check) = text
+            .trim()
+            .split_once(' ')
+            .ok_or_else(|| anyhow!("{} is damaged", path.display()))?;
+        let salt: [u8; 16] = B64
+            .decode(salt)?
+            .try_into()
+            .map_err(|_| anyhow!("{} is damaged", path.display()))?;
+        return Ok(Some(KeyFile::Master(Master {
+            salt,
+            check: check.to_string(),
+        })));
+    }
+    let key = bytes
+        .try_into()
+        .map_err(|_| anyhow!("{} is not a 32-byte key", path.display()))?;
+    Ok(Some(KeyFile::Plain(key)))
+}
+
+fn write_key_file(path: &Path, kf: &KeyFile) -> Result<()> {
+    let bytes = match kf {
+        KeyFile::Plain(key) => key.to_vec(),
+        KeyFile::Master(m) => {
+            let mut b = MASTER_MAGIC.to_vec();
+            b.extend(format!("{} {}\n", B64.encode(m.salt), m.check).into_bytes());
+            b
+        }
+    };
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    restrict_permissions(&tmp);
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Argon2id with its recommended defaults (19 MiB, 2 passes).
+fn derive_key(password: &str, salt: &[u8; 16]) -> Result<[u8; 32]> {
+    let mut key = [0u8; 32];
+    argon2::Argon2::default()
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|e| anyhow!("deriving key: {e}"))?;
+    Ok(key)
 }
 
 pub fn config_dir() -> PathBuf {
@@ -459,7 +588,17 @@ impl Store {
 
     pub fn load(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        let key = load_or_create_key(&dir.join("key"))?;
+        let key_path = dir.join("key");
+        let (key, master) = match read_key_file(&key_path)? {
+            Some(KeyFile::Plain(key)) => (Some(key), None),
+            Some(KeyFile::Master(m)) => (None, Some(m)),
+            None => {
+                let mut key = [0u8; 32];
+                rand::rng().fill_bytes(&mut key);
+                write_key_file(&key_path, &KeyFile::Plain(key))?;
+                (Some(key), None)
+            }
+        };
         let path = dir.join("gcm.toml");
         let file: FileFormat = if path.exists() {
             let text =
@@ -472,36 +611,111 @@ impl Store {
             settings: file.settings,
             sessions: file.sessions,
             tunnels: file.tunnels,
+            snippets: file.snippets,
             path,
+            key_path,
             key,
+            master,
         };
         for s in &mut store.sessions {
             if s.id == 0 {
                 s.id = new_id();
             }
+        }
+        store.decrypt_passwords();
+        Ok(store)
+    }
+
+    fn decrypt_passwords(&mut self) {
+        let Some(key) = self.key else { return };
+        for s in &mut self.sessions {
             if !s.password_enc.is_empty() {
                 // A bad entry should not stop the app from starting.
-                s.password = decrypt(&store.key, &s.password_enc).unwrap_or_else(|e| {
+                s.password = decrypt(&key, &s.password_enc).unwrap_or_else(|e| {
                     log::warn!("cannot decrypt password for {}: {e}", s.display_name());
                     String::new()
                 });
             }
         }
-        Ok(store)
+    }
+
+    /// True while a master password protects the saved passwords and has
+    /// not been entered; passwords are then empty and kept as stored.
+    pub fn is_locked(&self) -> bool {
+        self.key.is_none()
+    }
+
+    pub fn has_master_password(&self) -> bool {
+        self.master.is_some()
+    }
+
+    pub fn unlock(&mut self, password: &str) -> Result<()> {
+        let Some(m) = self.master.clone() else {
+            return Ok(());
+        };
+        let key = derive_key(password, &m.salt)?;
+        match decrypt(&key, &m.check) {
+            Ok(check) if check == MASTER_CHECK => {}
+            _ => return Err(anyhow!("wrong master password")),
+        }
+        self.key = Some(key);
+        self.decrypt_passwords();
+        Ok(())
+    }
+
+    /// Protect saved passwords with `password`, or remove the protection
+    /// with None. Re-encrypts everything; needs the store unlocked.
+    pub fn set_master_password(&mut self, password: Option<&str>) -> Result<()> {
+        if self.is_locked() {
+            return Err(anyhow!("unlock the saved passwords first"));
+        }
+        let (key, kf) = match password {
+            Some(p) if !p.is_empty() => {
+                let mut salt = [0u8; 16];
+                rand::rng().fill_bytes(&mut salt);
+                let key = derive_key(p, &salt)?;
+                let m = Master {
+                    salt,
+                    check: encrypt(&key, MASTER_CHECK)?,
+                };
+                (key, KeyFile::Master(m))
+            }
+            _ => {
+                let mut key = [0u8; 32];
+                rand::rng().fill_bytes(&mut key);
+                (key, KeyFile::Plain(key))
+            }
+        };
+        // Write the config re-encrypted first, then the key that opens it.
+        let old = self.key.replace(key);
+        if let Err(e) = self.save() {
+            self.key = old;
+            return Err(e);
+        }
+        write_key_file(&self.key_path, &kf)?;
+        self.master = match kf {
+            KeyFile::Master(m) => Some(m),
+            KeyFile::Plain(_) => None,
+        };
+        Ok(())
     }
 
     pub fn save(&mut self) -> Result<()> {
-        for s in &mut self.sessions {
-            s.password_enc = if s.password.is_empty() {
-                String::new()
-            } else {
-                encrypt(&self.key, &s.password)?
-            };
+        // While locked, stored passwords are kept exactly as they were.
+        if let Some(key) = self.key {
+            for s in &mut self.sessions {
+                s.password_enc = if s.password.is_empty() {
+                    String::new()
+                } else {
+                    encrypt(&key, &s.password)?
+                };
+            }
         }
         let file = FileFormat {
             settings: self.settings.clone(),
             sessions: self.sessions.clone(),
             tunnels: self.tunnels.clone(),
+            snippets: self.snippets.clone(),
         };
         let text = toml::to_string_pretty(&file)?;
         // Write then rename so a crash never leaves a truncated config.
@@ -576,19 +790,6 @@ impl Store {
         out.sort();
         out
     }
-}
-
-fn load_or_create_key(path: &Path) -> Result<[u8; 32]> {
-    if let Ok(bytes) = fs::read(path) {
-        return bytes
-            .try_into()
-            .map_err(|_| anyhow!("{} is not a 32-byte key", path.display()));
-    }
-    let mut key = [0u8; 32];
-    rand::rng().fill_bytes(&mut key);
-    fs::write(path, key)?;
-    restrict_permissions(path);
-    Ok(key)
 }
 
 #[cfg(unix)]
@@ -719,6 +920,54 @@ mod tests {
         assert_eq!((s.host.as_str(), s.serial.baud), ("COM3", 9600));
         assert!(Session::from_quick("host:notaport").is_none());
         assert!(Session::from_quick("").is_none());
+    }
+
+    #[test]
+    fn master_password() {
+        let dir = std::env::temp_dir().join(format!("gcm-rs-test-{}", new_id()));
+        let mut store = Store::load(&dir).unwrap();
+        assert!(!store.has_master_password() && !store.is_locked());
+        let mut s = Session::new(Protocol::Ssh);
+        s.host = "h".into();
+        s.password = "pw1".into();
+        store.upsert(s);
+        store.save().unwrap();
+        store.set_master_password(Some("correct horse")).unwrap();
+
+        // A fresh start is locked: no passwords until unlocked.
+        let mut again = Store::load(&dir).unwrap();
+        assert!(again.has_master_password() && again.is_locked());
+        assert_eq!(again.sessions[0].password, "");
+        // Saving while locked must not lose the stored password.
+        again.settings.font_size = 15.0;
+        again.save().unwrap();
+        assert!(again.unlock("wrong").is_err());
+        again.unlock("correct horse").unwrap();
+        assert_eq!(again.sessions[0].password, "pw1");
+
+        // Removing the master password leaves an unlocked store.
+        again.set_master_password(None).unwrap();
+        let plain = Store::load(&dir).unwrap();
+        assert!(!plain.is_locked() && !plain.has_master_password());
+        assert_eq!(
+            (
+                plain.sessions[0].password.as_str(),
+                plain.settings.font_size
+            ),
+            ("pw1", 15.0)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn snippet_keystrokes() {
+        let mut sn = Snippet {
+            text: "cd /tmp\nls".into(),
+            ..Default::default()
+        };
+        assert_eq!(sn.keystrokes(), "cd /tmp\rls\r");
+        sn.press_enter = false;
+        assert_eq!(sn.keystrokes(), "cd /tmp\rls");
     }
 
     #[test]

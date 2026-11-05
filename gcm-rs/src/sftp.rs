@@ -643,7 +643,7 @@ impl Browser {
                             .hint_text("folder name")
                             .desired_width(120.0),
                     );
-                    r.request_focus();
+                    crate::app::focus_on_open(ui, &r);
                     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if (ui.button("Create").clicked() || enter) && !name.trim().is_empty() {
                         self.send(Op::Mkdir(name.trim().to_string()));
@@ -660,7 +660,7 @@ impl Browser {
             Input::Rename { from, mut to } => {
                 ui.horizontal(|ui| {
                     let r = ui.add(egui::TextEdit::singleline(&mut to).desired_width(120.0));
-                    r.request_focus();
+                    crate::app::focus_on_open(ui, &r);
                     let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                     if (ui.button("Rename").clicked() || enter)
                         && !to.trim().is_empty()

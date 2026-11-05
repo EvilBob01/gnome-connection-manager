@@ -24,7 +24,7 @@ impl App {
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
-                        session_form(ui, session, &self.store.folders());
+                        session_form(ui, session, &self.store.folders(), self.store.is_locked());
                         ui.separator();
                         if *is_new {
                             ui.checkbox(save, "Save to session list");
@@ -253,6 +253,211 @@ impl App {
                     self.save();
                 }
             }
+            Modal::RenameTab { id, title } => {
+                let id = *id;
+                egui::Window::new("Rename tab")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        let r = ui.add(egui::TextEdit::singleline(title).desired_width(260.0));
+                        crate::app::focus_on_open(ui, &r);
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                        ui.horizontal(|ui| {
+                            let apply = ui.button("Rename").clicked() || enter;
+                            let reset = ui.button("Use session name").clicked();
+                            if apply || reset {
+                                let new = (apply && !title.trim().is_empty())
+                                    .then(|| title.trim().to_string());
+                                if let Some((_, tab)) =
+                                    self.dock.iter_all_tabs_mut().find(|(_, t)| t.id == id)
+                                {
+                                    tab.custom_title = new;
+                                }
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked()
+                                || ui.input(|i| i.key_pressed(Key::Escape))
+                            {
+                                keep = false;
+                            }
+                        });
+                    });
+            }
+            Modal::Snippets { items, selected } => {
+                egui::Window::new("Snippets")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(
+                            RichText::new(
+                                "Text you send often. Send one from the Snippets toolbar menu or a tab's menu; \
+                                 with MultiExec on it reaches the whole group.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                        ui.horizontal_top(|ui| {
+                            ui.vertical(|ui| {
+                                ui.set_width(170.0);
+                                egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                                    for (i, sn) in items.iter().enumerate() {
+                                        let name = if sn.name.is_empty() { "(unnamed)" } else { sn.name.as_str() };
+                                        if ui.selectable_label(*selected == Some(i), name).clicked() {
+                                            *selected = Some(i);
+                                        }
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("➕ New").clicked() {
+                                        items.push(Snippet { name: "New snippet".into(), ..Default::default() });
+                                        *selected = Some(items.len() - 1);
+                                    }
+                                    if ui.add_enabled(selected.is_some(), egui::Button::new("🗑 Delete")).clicked()
+                                        && let Some(i) = selected.take()
+                                    {
+                                        items.remove(i);
+                                        *selected = (!items.is_empty()).then(|| i.min(items.len() - 1));
+                                    }
+                                });
+                            });
+                            ui.separator();
+                            ui.vertical(|ui| match selected.and_then(|i| items.get_mut(i)) {
+                                Some(sn) => {
+                                    ui.add(egui::TextEdit::singleline(&mut sn.name).hint_text("name").desired_width(320.0));
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut sn.text)
+                                            .code_editor()
+                                            .desired_rows(8)
+                                            .desired_width(320.0)
+                                            .hint_text("commands, one per line"),
+                                    );
+                                    ui.checkbox(&mut sn.press_enter, "Press Enter after the last line");
+                                    if ui.button("▶ Send to current tab").clicked() {
+                                        self.actions.push(Action::SendText(None, sn.keystrokes()));
+                                    }
+                                }
+                                None => {
+                                    ui.label(RichText::new("No snippet selected.").weak());
+                                }
+                            });
+                        });
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() {
+                                self.store.snippets = std::mem::take(items);
+                                self.save();
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+            }
+            Modal::Unlock { password, error } => {
+                egui::Window::new("Unlock saved passwords")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label("Saved passwords are protected by a master password.");
+                        // Not focused automatically: this dialog opens while the window
+                        // starts, and taking focus then left the input method dropping keys.
+                        let r = ui.add(
+                            egui::TextEdit::singleline(password)
+                                .password(true)
+                                .hint_text("click here, type, press Enter")
+                                .desired_width(260.0),
+                        );
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                        if let Some(e) = error.as_ref() {
+                            ui.label(RichText::new(e).color(Color32::from_rgb(230, 80, 80)));
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Unlock").clicked() || enter {
+                                match self.store.unlock(password) {
+                                    Ok(()) => {
+                                        keep = false;
+                                        self.info("Saved passwords unlocked");
+                                        if self.store.settings.restore_tabs
+                                            && self.dock.iter_all_tabs().next().is_none()
+                                        {
+                                            self.restore_layout(ctx);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        *error = Some(format!("{e:#}"));
+                                        password.clear();
+                                    }
+                                }
+                            }
+                            if ui
+                                .button("Continue without")
+                                .on_hover_text(
+                                    "Sessions connect, but saved passwords are not typed in",
+                                )
+                                .clicked()
+                            {
+                                keep = false;
+                            }
+                        });
+                    });
+            }
+            Modal::MasterPassword { new, repeat, error } => {
+                let has = self.store.has_master_password();
+                egui::Window::new("Master password")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(if has {
+                            "Saved passwords are protected by a master password. Set a new one, or remove it."
+                        } else {
+                            "Protect saved passwords with a master password, asked for when gcm-rs starts. \
+                             Without it, anyone who can read your config folder can recover them."
+                        });
+                        egui::Grid::new("master_form").num_columns(2).show(ui, |ui| {
+                            ui.label("New master password");
+                            ui.add(egui::TextEdit::singleline(new).password(true));
+                            ui.end_row();
+                            ui.label("Repeat");
+                            ui.add(egui::TextEdit::singleline(repeat).password(true));
+                            ui.end_row();
+                        });
+                        ui.label(
+                            RichText::new("If you forget it, the saved passwords cannot be recovered.").weak().small(),
+                        );
+                        if let Some(e) = error.as_ref() {
+                            ui.label(RichText::new(e).color(Color32::from_rgb(230, 80, 80)));
+                        }
+                        ui.horizontal(|ui| {
+                            let ok = !new.is_empty() && new == repeat;
+                            if ui.add_enabled(ok, egui::Button::new("Set master password")).clicked() {
+                                match self.store.set_master_password(Some(new)) {
+                                    Ok(()) => {
+                                        self.info("Master password set");
+                                        keep = false;
+                                    }
+                                    Err(e) => *error = Some(format!("{e:#}")),
+                                }
+                            }
+                            if has && ui.button("Remove master password").clicked() {
+                                match self.store.set_master_password(None) {
+                                    Ok(()) => {
+                                        self.info("Master password removed");
+                                        keep = false;
+                                    }
+                                    Err(e) => *error = Some(format!("{e:#}")),
+                                }
+                            }
+                            if ui.button("Cancel").clicked() {
+                                keep = false;
+                            }
+                        });
+                    });
+            }
             Modal::About => {
                 egui::Window::new("About")
                     .collapsible(false)
@@ -302,7 +507,7 @@ fn confirm(
         });
 }
 
-fn session_form(ui: &mut Ui, s: &mut Session, folders: &[String]) {
+fn session_form(ui: &mut Ui, s: &mut Session, folders: &[String], locked: bool) {
     egui::Grid::new("session_form")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -459,8 +664,14 @@ fn session_form(ui: &mut Ui, s: &mut Session, folders: &[String]) {
                     ui.text_edit_singleline(&mut s.user);
                     ui.end_row();
                     ui.label("Password");
-                    ui.add(egui::TextEdit::singleline(&mut s.password).password(true))
-                        .on_hover_text("Typed in when the server asks. SSH keys are safer.");
+                    if locked {
+                        ui.label(
+                            RichText::new("🔒 locked: enter the master password first").weak(),
+                        );
+                    } else {
+                        ui.add(egui::TextEdit::singleline(&mut s.password).password(true))
+                            .on_hover_text("Typed in when the server asks. SSH keys are safer.");
+                    }
                     ui.end_row();
                 }
             }
@@ -662,6 +873,69 @@ fn color_choice(ui: &mut Ui, value: &mut String, label: &str, default: [u8; 3]) 
 }
 
 fn settings_form(ui: &mut Ui, s: &mut Settings) {
+    egui::ScrollArea::vertical()
+        .max_height(ui.ctx().content_rect().height() * 0.7)
+        .show(ui, |ui| {
+            settings_grid(ui, s);
+            ui.separator();
+            shortcuts_form(ui, s);
+        });
+}
+
+fn shortcuts_form(ui: &mut Ui, s: &mut Settings) {
+    use crate::shortcuts::{Command, parse};
+    egui::CollapsingHeader::new("Keyboard shortcuts").show(ui, |ui| {
+        ui.label(
+            RichText::new(
+                "Like Ctrl+Shift+T, Alt+F2 or Ctrl+PageDown; \"none\" turns a shortcut off.",
+            )
+            .weak()
+            .small(),
+        );
+        egui::Grid::new("shortcuts_form")
+            .num_columns(3)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                for c in Command::ALL {
+                    ui.label(c.label());
+                    let mut text = s
+                        .shortcuts
+                        .get(c.id())
+                        .cloned()
+                        .unwrap_or_else(|| c.default_shortcut().to_string());
+                    let valid = text.eq_ignore_ascii_case("none") || parse(&text).is_some();
+                    let edit = egui::TextEdit::singleline(&mut text).desired_width(150.0);
+                    let edit = if valid {
+                        edit
+                    } else {
+                        edit.text_color(Color32::from_rgb(230, 80, 80))
+                    };
+                    if ui.add(edit).changed() {
+                        if text == c.default_shortcut() {
+                            s.shortcuts.remove(c.id());
+                        } else {
+                            s.shortcuts.insert(c.id().to_string(), text);
+                        }
+                    }
+                    if !valid {
+                        ui.label(
+                            RichText::new("not understood")
+                                .small()
+                                .color(Color32::from_rgb(230, 80, 80)),
+                        );
+                    } else {
+                        ui.label("");
+                    }
+                    ui.end_row();
+                }
+            });
+        if ui.button("Reset to defaults").clicked() {
+            s.shortcuts.clear();
+        }
+    });
+}
+
+fn settings_grid(ui: &mut Ui, s: &mut Settings) {
     egui::Grid::new("settings_form")
         .num_columns(2)
         .spacing([12.0, 6.0])
@@ -741,6 +1015,22 @@ fn settings_form(ui: &mut Ui, s: &mut Settings) {
                 .unwrap_or_default();
             ui.add(egui::TextEdit::singleline(&mut s.download_dir).hint_text(default_dl));
             ui.end_row();
+            ui.label("Tabs");
+            ui.checkbox(&mut s.restore_tabs, "Reopen the tabs and split layout from last time");
+            ui.end_row();
+            if cfg!(windows) {
+                ui.label("X11 display");
+                ui.add(egui::TextEdit::singleline(&mut s.x_display).hint_text("localhost:0.0"));
+                ui.end_row();
+                ui.label("X server command");
+                ui.add(
+                    egui::TextEdit::singleline(&mut s.x_server_command)
+                        .hint_text("empty: start VcXsrv or Xming if installed")
+                        .desired_width(360.0),
+                )
+                .on_hover_text("Started when an SSH session with X11 forwarding opens and no X server answers");
+                ui.end_row();
+            }
             ui.label("Log folder");
             let default_logs = crate::config::config_dir()
                 .join("logs")

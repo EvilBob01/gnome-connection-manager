@@ -19,6 +19,26 @@ impl App {
                 }
                 ui.separator();
                 ui.menu_button("Import sessions", |ui| self.import_menu(ui));
+                let label = if self.store.has_master_password() {
+                    "Master password…"
+                } else {
+                    "Set master password…"
+                };
+                if ui.button(label).clicked() {
+                    self.modal = Some(if self.store.is_locked() {
+                        Modal::Unlock {
+                            password: String::new(),
+                            error: None,
+                        }
+                    } else {
+                        Modal::MasterPassword {
+                            new: String::new(),
+                            repeat: String::new(),
+                            error: None,
+                        }
+                    });
+                    ui.close();
+                }
                 if ui.button("Open log folder").clicked() {
                     let dir = self.store.settings.log_dir();
                     if let Err(e) = std::fs::create_dir_all(&dir)
@@ -97,6 +117,34 @@ impl App {
             if ui.add(big("⚙", "Settings")).clicked() {
                 self.modal = Some(Modal::Settings(self.store.settings.clone()));
             }
+            ui.menu_button(RichText::new("📋  Snippets").size(14.0), |ui| {
+                if self.store.snippets.is_empty() {
+                    ui.label(RichText::new("No snippets yet").weak());
+                }
+                for sn in &self.store.snippets {
+                    let target = if self.multiexec {
+                        "the MultiExec group"
+                    } else {
+                        "the current tab"
+                    };
+                    if ui
+                        .button(&sn.name)
+                        .on_hover_text(format!("Send to {target}:\n{}", sn.text))
+                        .clicked()
+                    {
+                        self.actions.push(Action::SendText(None, sn.keystrokes()));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                if ui.button("Manage snippets…").clicked() {
+                    self.modal = Some(Modal::Snippets {
+                        selected: (!self.store.snippets.is_empty()).then_some(0),
+                        items: self.store.snippets.clone(),
+                    });
+                    ui.close();
+                }
+            });
             let tunnels_btn = egui::Button::new(RichText::new("⇄  Tunnels").size(14.0))
                 .selected(self.show_sidebar && self.sidebar_tab == SidebarTab::Tunnels);
             if ui
@@ -120,6 +168,7 @@ impl App {
             ui.label("Quick connect:");
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.quick)
+                    .id(egui::Id::new("quick_connect"))
                     .hint_text("user@host:port   mosh://host   telnet://host   rdp://host")
                     .desired_width(280.0),
             );

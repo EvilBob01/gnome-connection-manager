@@ -7,6 +7,9 @@ pub(super) struct Viewer<'a> {
     pub(super) actions: &'a mut Vec<Action>,
     pub(super) modal: &'a mut Option<Modal>,
     pub(super) multiexec: bool,
+    pub(super) snippets: &'a [Snippet],
+    /// Set to the tab whose terminal has keyboard focus.
+    pub(super) focused_tab: &'a mut Option<u64>,
 }
 
 impl TabViewer for Viewer<'_> {
@@ -18,8 +21,13 @@ impl TabViewer for Viewer<'_> {
 
     fn title(&mut self, tab: &mut Tab) -> WidgetText {
         // Local shells have no saved name, so show what the shell reports (usually the cwd).
-        let label = match tab.term.title() {
-            Some(t) if tab.session.protocol == Protocol::Local && tab.session.name.is_empty() => t,
+        let label = match (&tab.custom_title, tab.term.title()) {
+            (Some(custom), _) => custom.clone(),
+            (None, Some(t))
+                if tab.session.protocol == Protocol::Local && tab.session.name.is_empty() =>
+            {
+                t
+            }
             _ => tab.session.display_name(),
         };
         let mut name = format!("{} {}", tab.session.protocol.icon(), label);
@@ -58,7 +66,7 @@ impl TabViewer for Viewer<'_> {
         }
         let s = self.settings;
         let rect = ui.available_rect_before_wrap();
-        tab.term.ui(
+        let focused = tab.term.ui(
             ui,
             s.font_size,
             s.dark_mode,
@@ -66,6 +74,9 @@ impl TabViewer for Viewer<'_> {
             s.paste_on_right_click,
             s.ime_enabled(),
         );
+        if focused {
+            *self.focused_tab = Some(tab.id);
+        }
         if self.multiexec && tab.in_group {
             // Make it obvious which terminals will receive keystrokes.
             ui.painter().rect_stroke(
@@ -78,6 +89,25 @@ impl TabViewer for Viewer<'_> {
     }
 
     fn context_menu(&mut self, ui: &mut Ui, tab: &mut Tab, path: NodePath) {
+        if ui.button("Rename tab…").clicked() {
+            let title = tab
+                .custom_title
+                .clone()
+                .unwrap_or_else(|| tab.session.display_name());
+            *self.modal = Some(Modal::RenameTab { id: tab.id, title });
+            ui.close();
+        }
+        if !self.snippets.is_empty() {
+            ui.menu_button("Send snippet", |ui| {
+                for sn in self.snippets {
+                    if ui.button(&sn.name).clicked() {
+                        self.actions
+                            .push(Action::SendText(Some(tab.id), sn.keystrokes()));
+                        ui.close();
+                    }
+                }
+            });
+        }
         ui.checkbox(&mut tab.in_group, "Include in MultiExec");
         match tab.term.log_path() {
             Some(path) => {

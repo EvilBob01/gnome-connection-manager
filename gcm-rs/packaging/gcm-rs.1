@@ -59,8 +59,13 @@ Sessions, tunnels and settings (plain TOML).
 .TP
 .I ~/.config/gcm-rs/key
 Random key used to encrypt saved passwords in
-.IR gcm.toml .
-Anyone who can read both files can recover the passwords; prefer SSH keys.
+.IR gcm.toml ,
+or, with a master password, the salt from which the key is derived (Argon2id).
+Without a master password anyone who can read both files can recover the
+passwords; prefer SSH keys.
+.TP
+.I ~/.config/gcm-rs/layout.json
+Open tabs and split layout, when Settings asks for them to be reopened.
 .TP
 .I ~/.config/gcm-rs/logs/
 Default folder for session logs.

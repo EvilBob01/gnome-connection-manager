@@ -9,9 +9,11 @@ mod mobaxterm;
 mod putty;
 mod sessionlog;
 mod sftp;
+mod shortcuts;
 mod telnet;
 mod terminal;
 mod tunnel;
+mod x11;
 
 const USAGE: &str = "usage: gcm-rs [SESSION | [proto://][user@]host[:port]]...
 

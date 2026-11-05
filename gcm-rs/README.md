@@ -36,6 +36,13 @@ It lives next to the original Python app while it matures.
   remote `-R`, SOCKS `-D`). Each runs through a saved SSH session on its own, without a terminal tab, and can
   be started, stopped and set to start with gcm. A coloured dot shows its state: grey stopped, yellow
   connecting, green up, red failed with ssh's error underneath. See *Tunnels* below.
+- **Snippets**: saved commands (MobaXterm's macros), sent from the *📋 Snippets* toolbar menu or a tab's
+  *Send snippet* menu. Each line is typed followed by Enter; with MultiExec on they reach the whole group.
+  *Manage snippets…* (`Ctrl+Shift+S`) adds and edits them.
+- **Tabs**: *Rename tab…* in the tab menu (`Ctrl+Shift+R`). *Settings → Reopen the tabs and split layout
+  from last time* brings back the open sessions, splits and tab names on the next start. Saved sessions
+  get their passwords from the encrypted store; nothing secret is written to the layout file.
+- **Master password** (*Session → Set master password…*): see *Settings and files* below.
 - **Per-session colours**: give a session its own text and background colour (*Colours* in the session
   editor), e.g. a red background for production. Imported from GCM's `font-color`/`back-color`.
 - **Session logging**: tick *Save terminal output to a log file* on a session, or use *Start logging* /
@@ -98,6 +105,24 @@ Notes:
 
 On Windows `Ctrl+C` copies when text is selected and sends an interrupt otherwise, as Windows Terminal
 does. On Linux it always sends an interrupt.
+
+### Shortcuts
+
+All of these can be changed under *Settings → Keyboard shortcuts* (type e.g. `Alt+F2`, or `none` to turn
+one off). The defaults use `Ctrl+Shift` so plain `Ctrl`+letter still reaches the terminal.
+
+| Command | Default |
+|---|---|
+| New session | `Ctrl+Shift+N` |
+| Local shell | `Ctrl+Shift+T` |
+| Go to quick connect | `Ctrl+Shift+K` |
+| Close tab | `Ctrl+Shift+W` |
+| Next / previous tab | `Ctrl+Tab` / `Ctrl+Shift+Tab` |
+| Duplicate tab | `Ctrl+Shift+D` |
+| Rename tab | `Ctrl+Shift+R` |
+| Show/hide sidebar | `Ctrl+Shift+B` |
+| MultiExec on/off | `Ctrl+Shift+M` |
+| Manage snippets | `Ctrl+Shift+S` |
 
 ## SFTP
 
@@ -214,6 +239,10 @@ Fallback fonts are picked up from DejaVu and Noto CJK if installed.
 - **Telnet**: built in; nothing to install.
 - **Mosh**: Windows has no native mosh client. Install it in WSL or Cygwin and set *Settings → Mosh
   command* accordingly (e.g. `wsl mosh`).
+- **X11 forwarding**: Windows has no X server. When an SSH session with *X11 forwarding* opens, gcm-rs
+  checks for one on `localhost:0.0` and, if none answers, starts VcXsrv or Xming if installed (or your
+  own *Settings → X server command*), then gives ssh `DISPLAY` so graphical programs open on your
+  desktop. X410 works too if it is already running.
 - **RDP** uses `mstsc` and **VNC** expects `vncviewer.exe` (TigerVNC, RealVNC, …) on `PATH`. Change
   either in Settings.
 
@@ -223,10 +252,18 @@ Fallback fonts are picked up from DejaVu and Noto CJK if installed.
 |---|---|---|
 | Config | `~/.config/gcm-rs/gcm.toml` | `%APPDATA%\gcm-rs\gcm.toml` |
 | Password key | `~/.config/gcm-rs/key` (mode 0600) | `%APPDATA%\gcm-rs\key` |
+| Tab layout | `~/.config/gcm-rs/layout.json` | `%APPDATA%\gcm-rs\layout.json` |
 
-`gcm.toml` is plain TOML and can be edited by hand. Passwords are stored AES-256-GCM encrypted with the
-random key in `key`. As with the original GCM, this only keeps them out of plain sight: anyone who can
-read both files can recover them. **Prefer SSH keys.**
+`gcm.toml` is plain TOML and can be edited by hand. Passwords are stored AES-256-GCM encrypted. By default
+the key is random and sits in `key`: as with the original GCM, this only keeps them out of plain sight,
+and anyone who can read both files can recover them.
+
+With a **master password** (*Session → Set master password…*), `key` holds only a salt and a check value,
+and the encryption key is derived from your master password with Argon2id. gcm-rs then starts with
+saved passwords locked. Click the field in the *Unlock* dialog, type the password and press Enter, or
+choose *Continue without*. Sessions still connect while locked, but saved passwords aren't typed in, and
+nothing already stored is lost. If you forget the master password, the saved passwords can't be
+recovered; the same menu entry changes or removes it. **SSH keys are still the better option.**
 
 The RDP and VNC commands are templates that accept `{host}`, `{port}`, `{user}` and `{password}`. If a
 placeholder's value is empty, the whole argument containing it is dropped, so `/p:{password}` vanishes
@@ -255,6 +292,8 @@ when no password is saved. Defaults:
 | `src/sftp.rs` | SFTP browser: drives the system `sftp`, file table |
 | `src/tunnel.rs` | Tunnel manager: saved forwards, `ssh -N` processes, status |
 | `src/sessionlog.rs` | Session logs: escape-code stripping, log files |
+| `src/shortcuts.rs` | Keyboard shortcut commands, defaults and parsing |
+| `src/x11.rs` | X11 forwarding on Windows: find or start an X server |
 | `src/launch.rs` | Session → command line (ssh/telnet args, RDP/VNC templates), askpass helper |
 | `src/config.rs` | Sessions, settings, TOML storage, password encryption |
 | `src/gcm_import.rs` | Reader for the original GCM config and its pyAES passwords |
