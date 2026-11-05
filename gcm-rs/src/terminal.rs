@@ -307,6 +307,7 @@ impl Read for SerialReader {
 struct AutofillState {
     user: Option<String>,
     password: Option<String>,
+    host: Option<String>,
     tail: String,
 }
 
@@ -334,6 +335,10 @@ impl AutofillState {
                 self.tail.clear();
             }
         } else if prompt.ends_with("assword:")
+            && self
+                .host
+                .as_deref()
+                .is_none_or(|h| crate::launch::prompt_is_for(&prompt, h))
             && let Some(pw) = self.password.take()
         {
             write_all(writer, format!("{pw}\r").as_bytes());
@@ -546,6 +551,7 @@ impl Terminal {
         let mut autofill = AutofillState {
             user: autofill.user,
             password: autofill.password,
+            host: autofill.host,
             tail: String::new(),
         };
         thread::spawn(move || {
@@ -662,6 +668,9 @@ impl Terminal {
             .contains(TermMode::BRACKETED_PASTE);
         let text = text.replace("\r\n", "\r").replace('\n', "\r");
         if bracketed {
+            // Like xterm, drop ESC so the text cannot end paste mode early
+            // (`ESC[201~`) and run the rest as typed commands.
+            let text = text.replace('\x1b', "");
             self.write(format!("\x1b[200~{text}\x1b[201~").as_bytes());
         } else {
             self.write(text.as_bytes());
@@ -1550,6 +1559,7 @@ mod tests {
         let mut a = AutofillState {
             user: Some("bob".into()),
             password: Some("pw".into()),
+            host: None,
             tail: String::new(),
         };
         let armed = AtomicBool::new(true);
@@ -1564,6 +1574,7 @@ mod tests {
         let mut a = AutofillState {
             user: None,
             password: Some("pw".into()),
+            host: None,
             tail: String::new(),
         };
         armed.store(false, Ordering::Relaxed);

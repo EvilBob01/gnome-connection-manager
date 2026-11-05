@@ -126,8 +126,9 @@ fn forwards(spec: &str) -> Vec<String> {
     spec.split(',')
         .filter_map(|f| {
             let f = f.trim().trim_start_matches(['4', '6']);
-            let kind = f.chars().next()?;
-            let rest = &f[1..];
+            let mut chars = f.chars();
+            let kind = chars.next()?;
+            let rest = chars.as_str();
             match kind {
                 'L' | 'R' => {
                     let (listen, dest) = rest.split_once('=')?;

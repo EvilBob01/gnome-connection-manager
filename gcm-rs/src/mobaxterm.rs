@@ -187,8 +187,21 @@ fn session(name: &str, value: &str, folder: &str) -> std::result::Result<Session
                         format!("{user}{h}{port}")
                     })
                     .collect();
-                if !jumps.is_empty() {
-                    s.extra_args = format!("-J {}", jumps.join(","));
+                // The field is split again like a command line, so anything
+                // beyond plain host-name characters is quoted.
+                let joined = jumps.join(",");
+                let plain = joined
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "@,:._-[]%".contains(c));
+                if !jumps.is_empty()
+                    && !jumps.iter().any(|j| j.starts_with('-'))
+                    && let Ok(quoted) = shlex::try_quote(&joined)
+                {
+                    s.extra_args = if plain {
+                        format!("-J {joined}")
+                    } else {
+                        format!("-J {quoted}")
+                    };
                 }
             }
             s.fg_color = color(tget(6), "236,236,236");

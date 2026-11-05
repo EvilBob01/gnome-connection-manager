@@ -82,6 +82,25 @@ pub fn quote(arg: &str) -> String {
     out
 }
 
+/// A quoted remote name that sftp cannot take for an option.
+fn remote(name: &str) -> String {
+    if name.starts_with('-') {
+        quote(&format!("./{name}"))
+    } else {
+        quote(name)
+    }
+}
+
+/// Whether a name from the server is safe to use as a local file name.
+fn safe_local_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\0'])
+        && !(cfg!(windows) && name.contains(['\\', ':']))
+        && std::path::Path::new(name).components().count() == 1
+}
+
 /// `sftp` arguments for an SSH session. Only the ssh options sftp also
 /// understands (`-o`, `-F`, `-J`, `-i`) are taken from the extra arguments;
 /// tunnels and forwarding stay with the terminal tab.
@@ -89,6 +108,7 @@ pub fn sftp_args(s: &Session) -> Result<Vec<String>> {
     if s.host.is_empty() {
         return Err(anyhow!("no host set"));
     }
+    crate::launch::check_target(s)?;
     let mut args = Vec::new();
     if s.port != 0 && s.port != 22 {
         args.extend(["-P".into(), s.port.to_string()]);
@@ -235,15 +255,20 @@ fn run(conn: &mut Conn, op: Op) -> std::result::Result<Vec<Reply>, String> {
             items
                 .iter()
                 .map(|e| {
+                    // The name comes from the server: one plain component only,
+                    // so a download cannot land outside the chosen folder.
+                    if !safe_local_name(&e.name) {
+                        return Err(format!("refusing to download {:?}", e.name));
+                    }
                     let local = local_dir.join(&e.name);
                     let r = if e.is_dir { "-r " } else { "" };
-                    format!(
+                    Ok(format!(
                         "get -p {r}{} {}",
-                        quote(&e.name),
+                        remote(&e.name),
                         quote(&local.to_string_lossy())
-                    )
+                    ))
                 })
-                .collect(),
+                .collect::<std::result::Result<_, _>>()?,
             false,
         ),
         Op::Put(paths) => (
@@ -256,7 +281,7 @@ fn run(conn: &mut Conn, op: Op) -> std::result::Result<Vec<Reply>, String> {
                 .collect(),
             true,
         ),
-        Op::Mkdir(name) => (vec![format!("mkdir {}", quote(name))], true),
+        Op::Mkdir(name) => (vec![format!("mkdir {}", remote(name))], true),
         Op::Remove(items) => (
             items
                 .iter()
@@ -264,14 +289,21 @@ fn run(conn: &mut Conn, op: Op) -> std::result::Result<Vec<Reply>, String> {
                     format!(
                         "{} {}",
                         if e.is_dir { "rmdir" } else { "rm" },
-                        quote(&e.name)
+                        remote(&e.name)
                     )
                 })
                 .collect(),
             true,
         ),
-        Op::Rename(from, to) => (vec![format!("rename {} {}", quote(from), quote(to))], true),
+        Op::Rename(from, to) => (
+            vec![format!("rename {} {}", remote(from), remote(to))],
+            true,
+        ),
     };
+    // sftp reads one command per line.
+    if cmds.iter().any(|c| c.contains(['\n', '\r'])) {
+        return Err("names with line breaks are not supported".into());
+    }
     let n = cmds.len();
     if relist {
         cmds.push("ls -la".into());
@@ -395,8 +427,11 @@ impl Browser {
         let label = format!("Connecting to {}…", session.host);
         match sftp_args(session) {
             Ok(args) => {
-                let mut cmd =
-                    crate::launch::background_ssh(&settings.sftp_command, &session.password);
+                let mut cmd = crate::launch::background_ssh(
+                    &settings.sftp_command,
+                    &session.password,
+                    &session.host,
+                );
                 cmd.args(&args);
                 Self::spawn(ctx, cmd, label)
             }
@@ -846,6 +881,19 @@ pub fn human_size(n: u64) -> String {
 mod tests {
     use super::*;
     use crate::config::Protocol;
+
+    #[test]
+    fn server_names_stay_in_the_download_folder() {
+        assert!(safe_local_name("report.txt"));
+        assert!(safe_local_name("-rf"));
+        assert!(!safe_local_name(".."));
+        assert!(!safe_local_name("."));
+        assert!(!safe_local_name("../../.bashrc"));
+        assert!(!safe_local_name("/etc/passwd"));
+        assert!(!safe_local_name(""));
+        assert_eq!(remote("-rf"), "\"./-rf\"");
+        assert_eq!(remote("a b"), "\"a b\"");
+    }
 
     #[test]
     fn parses_ls() {

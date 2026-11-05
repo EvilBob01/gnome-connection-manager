@@ -267,7 +267,8 @@ recovered; the same menu entry changes or removes it. **SSH keys are still the b
 
 The RDP and VNC commands are templates that accept `{host}`, `{port}`, `{user}` and `{password}`. If a
 placeholder's value is empty, the whole argument containing it is dropped, so `/p:{password}` vanishes
-when no password is saved. Defaults:
+when no password is saved. A password given on the command line can be read by other users of the
+same machine (`ps`), so on shared machines leave `/p:{password}` out and type it in the client. Defaults:
 
 - Linux: `xfreerdp /v:{host}:{port} /u:{user} /p:{password} /cert:tofu /dynamic-resolution` and
   `vncviewer {host}::{port}`

@@ -32,8 +32,10 @@ fn listening(display: &str) -> bool {
         .any(|a| TcpStream::connect_timeout(&a, Duration::from_millis(300)).is_ok())
 }
 
-/// Well-known X servers and the arguments that make them accept local
-/// TCP clients in multi-window mode.
+/// Well-known X servers and their multi-window arguments. Access control
+/// stays on (no `-ac`): both ship an `X0.hosts` that admits only localhost,
+/// which is where ssh connects from, so other machines on the network
+/// cannot open windows or read keystrokes.
 fn known_servers() -> Vec<(PathBuf, Vec<String>)> {
     let pf = |var: &str, default: &str| {
         PathBuf::from(std::env::var(var).unwrap_or_else(|_| default.into()))
@@ -46,11 +48,11 @@ fn known_servers() -> Vec<(PathBuf, Vec<String>)> {
     ] {
         out.push((
             base.join("VcXsrv").join("vcxsrv.exe"),
-            args(&[":0", "-multiwindow", "-clipboard", "-wgl", "-ac"]),
+            args(&[":0", "-multiwindow", "-clipboard", "-wgl"]),
         ));
         out.push((
             base.join("Xming").join("Xming.exe"),
-            args(&[":0", "-multiwindow", "-clipboard", "-ac"]),
+            args(&[":0", "-multiwindow", "-clipboard"]),
         ));
     }
     out

@@ -158,6 +158,7 @@ pub fn tunnel_args(t: &Tunnel, s: &Session) -> Result<Vec<String>> {
     if s.host.is_empty() {
         return Err(anyhow!("session \"{}\" has no host", s.display_name()));
     }
+    launch::check_target(s)?;
     let mut args = vec!["-N".into(), "-o".into(), "ExitOnForwardFailure=yes".into()];
     if s.keepalive == 0 {
         // Notice a dead link instead of looking up forever.
@@ -285,7 +286,7 @@ impl TunnelManager {
                 t.listen_port
             ));
         }
-        let mut cmd = launch::background_ssh(&settings.ssh_command, &s.password);
+        let mut cmd = launch::background_ssh(&settings.ssh_command, &s.password, &s.host);
         cmd.args(&args);
         self.spawn(t.id, cmd, probe)
     }

@@ -109,7 +109,7 @@ impl Protocol {
                 }
                 State::Sub if b == IAC => State::SubIac,
                 State::Sub => {
-                    self.sub.push(b);
+                    self.push_sub(b);
                     State::Sub
                 }
                 State::SubIac if b == SE => {
@@ -118,10 +118,19 @@ impl Protocol {
                 }
                 State::SubIac => {
                     // IAC IAC inside a subnegotiation is a literal 255.
-                    self.sub.push(b);
+                    self.push_sub(b);
                     State::Sub
                 }
             };
+        }
+    }
+
+    /// Subnegotiations we understand are a few bytes; a server that never
+    /// ends one must not fill memory.
+    fn push_sub(&mut self, b: u8) {
+        const MAX_SUB: usize = 4096;
+        if self.sub.len() < MAX_SUB {
+            self.sub.push(b);
         }
     }
 
@@ -331,6 +340,15 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn endless_subnegotiation_is_bounded() {
+        let mut p = Protocol::new(80, 24);
+        let (mut data, mut reply) = (Vec::new(), Vec::new());
+        p.receive(&[IAC, SB], &mut data, &mut reply);
+        p.receive(&vec![b'x'; 1 << 20], &mut data, &mut reply);
+        assert!(p.sub.len() <= 4096);
+    }
 
     fn run(p: &mut Protocol, input: &[u8]) -> (Vec<u8>, Vec<u8>) {
         let (mut data, mut reply) = (Vec::new(), Vec::new());

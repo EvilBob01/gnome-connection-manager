@@ -99,9 +99,20 @@ impl Stripper {
                     }
                 }
             }
-            b'\t' => self.line.push(b),
+            b'\t' => self.push(b, out),
             0x00..=0x1f | 0x7f => {}
-            _ => self.line.push(b),
+            _ => self.push(b, out),
+        }
+    }
+
+    /// Output that never ends a line (a binary dump, a full-screen app)
+    /// is written out in pieces instead of growing without bound.
+    fn push(&mut self, b: u8, out: &mut Vec<u8>) {
+        const MAX_LINE: usize = 64 * 1024;
+        self.line.push(b);
+        if self.line.len() >= MAX_LINE {
+            out.append(&mut self.line);
+            out.push(b'\n');
         }
     }
 

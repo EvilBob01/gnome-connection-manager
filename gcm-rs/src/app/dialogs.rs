@@ -381,6 +381,7 @@ impl App {
                                     Ok(()) => {
                                         keep = false;
                                         self.info("Saved passwords unlocked");
+                                        self.start_autostart_tunnels();
                                         if self.store.settings.restore_tabs
                                             && self.dock.iter_all_tabs().next().is_none()
                                         {
@@ -401,6 +402,7 @@ impl App {
                                 .clicked()
                             {
                                 keep = false;
+                                self.start_autostart_tunnels();
                             }
                         });
                     });

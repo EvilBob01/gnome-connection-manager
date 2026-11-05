@@ -166,19 +166,10 @@ impl App {
             last_focused_tab: None,
             status: None,
         };
-        for t in app
-            .store
-            .tunnels
-            .clone()
-            .into_iter()
-            .filter(|t| t.autostart)
-        {
-            if let Err(e) = app
-                .tunnels
-                .start(&t, &app.store.sessions, &app.store.settings)
-            {
-                app.error(format!("Tunnel {}: {e:#}", t.display_name()));
-            }
+        // With a master password, tunnels wait for the unlock dialog so
+        // they start with their saved passwords.
+        if !app.store.is_locked() {
+            app.start_autostart_tunnels();
         }
         if app.store.is_locked() {
             app.modal = Some(Modal::Unlock {
@@ -193,6 +184,23 @@ impl App {
                 .push(Action::Open(Session::new(Protocol::Local)));
         }
         app
+    }
+
+    pub(crate) fn start_autostart_tunnels(&mut self) {
+        for t in self
+            .store
+            .tunnels
+            .clone()
+            .into_iter()
+            .filter(|t| t.autostart)
+        {
+            if let Err(e) = self
+                .tunnels
+                .start(&t, &self.store.sessions, &self.store.settings)
+            {
+                self.error(format!("Tunnel {}: {e:#}", t.display_name()));
+            }
+        }
     }
 
     /// Reopen the tabs saved at the last exit, in the same split layout.

@@ -560,10 +560,37 @@ fn write_key_file(path: &Path, kf: &KeyFile) -> Result<()> {
         }
     };
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
-    restrict_permissions(&tmp);
+    write_private(&tmp, &bytes)?;
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Where a new key waits while the config is re-encrypted for it.
+fn staged_key_path(key_path: &Path) -> PathBuf {
+    key_path.with_extension("new")
+}
+
+/// Finish or undo a key change that was interrupted: if the config was
+/// rewritten after the new key was staged, the new key is the one that opens
+/// it; otherwise the old key still does.
+fn recover_staged_key(key_path: &Path, config: &Path) {
+    let staged = staged_key_path(key_path);
+    let Ok(staged_meta) = fs::metadata(&staged) else {
+        return;
+    };
+    let config_newer = fs::metadata(config)
+        .and_then(|m| m.modified())
+        .ok()
+        .zip(staged_meta.modified().ok())
+        .is_some_and(|(c, k)| c >= k);
+    let result = if config_newer {
+        fs::rename(&staged, key_path)
+    } else {
+        fs::remove_file(&staged)
+    };
+    if let Err(e) = result {
+        log::warn!("cannot recover {}: {e}", staged.display());
+    }
 }
 
 /// Argon2id with its recommended defaults (19 MiB, 2 passes).
@@ -587,8 +614,9 @@ impl Store {
     }
 
     pub fn load(dir: &Path) -> Result<Self> {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        create_private_dir(dir)?;
         let key_path = dir.join("key");
+        recover_staged_key(&key_path, &dir.join("gcm.toml"));
         let (key, master) = match read_key_file(&key_path)? {
             Some(KeyFile::Plain(key)) => (Some(key), None),
             Some(KeyFile::Master(m)) => (None, Some(m)),
@@ -686,13 +714,19 @@ impl Store {
                 (key, KeyFile::Plain(key))
             }
         };
-        // Write the config re-encrypted first, then the key that opens it.
+        // Stage the new key, rewrite the config for it, then swap the key in.
+        // Until the swap the old key still opens the old config; after a
+        // crash in between, Store::load finishes or undoes the change.
+        let staged = staged_key_path(&self.key_path);
+        write_key_file(&staged, &kf)?;
         let old = self.key.replace(key);
         if let Err(e) = self.save() {
             self.key = old;
+            let _ = fs::remove_file(&staged);
             return Err(e);
         }
-        write_key_file(&self.key_path, &kf)?;
+        fs::rename(&staged, &self.key_path)
+            .with_context(|| format!("replacing {}", self.key_path.display()))?;
         self.master = match kf {
             KeyFile::Master(m) => Some(m),
             KeyFile::Plain(_) => None,
@@ -720,8 +754,7 @@ impl Store {
         let text = toml::to_string_pretty(&file)?;
         // Write then rename so a crash never leaves a truncated config.
         let tmp = self.path.with_extension("toml.tmp");
-        fs::write(&tmp, text)?;
-        restrict_permissions(&tmp);
+        write_private(&tmp, text.as_bytes())?;
         fs::rename(&tmp, &self.path)?;
         Ok(())
     }
@@ -792,14 +825,38 @@ impl Store {
     }
 }
 
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+/// Write `bytes` to a new file only the owner can read (mode 0600 from the
+/// start, so there is no moment when others could open it), synced to disk.
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let _ = fs::remove_file(path);
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
 }
 
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {}
+/// Create the config folder private to the owner (0700 on Unix).
+fn create_private_dir(dir: &Path) -> Result<()> {
+    let mut b = fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        b.mode(0o700);
+    }
+    b.create(dir)
+        .with_context(|| format!("creating {}", dir.display()))
+}
 
 fn encrypt(key: &[u8; 32], plain: &str) -> Result<String> {
     let cipher = Aes256Gcm::new(key.into());

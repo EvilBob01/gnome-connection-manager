@@ -11,6 +11,9 @@ use crate::config::{Protocol, SerialSettings, Session, Settings};
 pub struct Autofill {
     pub user: Option<String>,
     pub password: Option<String>,
+    /// For ssh: only answer password prompts naming this host, so a jump
+    /// host never receives the target's password.
+    pub host: Option<String>,
 }
 
 #[derive(Debug)]
@@ -44,7 +47,23 @@ fn split_args(extra: &str) -> Result<Vec<String>> {
     shlex::split(extra).ok_or_else(|| anyhow!("cannot parse extra arguments: {extra}"))
 }
 
+/// Refuse a host or user that the client would read as an option, such as
+/// `-oProxyCommand=...` from an imported file, a host with whitespace, or
+/// control characters, which no real host or user name has.
+pub fn check_target(s: &Session) -> Result<()> {
+    if s.host.starts_with('-') || s.host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(anyhow!("refusing the host name {:?}", s.host));
+    }
+    if s.user.starts_with('-') || s.user.chars().any(char::is_control) {
+        return Err(anyhow!("refusing the user name {:?}", s.user));
+    }
+    Ok(())
+}
+
 pub fn build(s: &Session, settings: &Settings) -> Result<Launch> {
+    if !matches!(s.protocol, Protocol::Local | Protocol::Serial) {
+        check_target(s)?;
+    }
     match s.protocol {
         Protocol::Ssh => {
             if s.host.is_empty() {
@@ -83,6 +102,7 @@ pub fn build(s: &Session, settings: &Settings) -> Result<Launch> {
                 autofill: Autofill {
                     user: None,
                     password: non_empty(&s.password),
+                    host: Some(s.host.clone()),
                 },
             })
         }
@@ -96,6 +116,7 @@ pub fn build(s: &Session, settings: &Settings) -> Result<Launch> {
                 autofill: Autofill {
                     user: non_empty(&s.user),
                     password: non_empty(&s.password),
+                    host: None,
                 },
             })
         }
@@ -130,6 +151,7 @@ pub fn build(s: &Session, settings: &Settings) -> Result<Launch> {
                 autofill: Autofill {
                     user: None,
                     password: non_empty(&s.password),
+                    host: Some(s.host.clone()),
                 },
             })
         }
@@ -146,6 +168,7 @@ pub fn build(s: &Session, settings: &Settings) -> Result<Launch> {
                 autofill: Autofill {
                     user: non_empty(&s.user),
                     password: non_empty(&s.password),
+                    host: None,
                 },
             })
         }
@@ -216,6 +239,37 @@ pub fn ssh_common_args(s: &Session) -> Result<Vec<String>> {
 
 const ASKPASS_FLAG: &str = "GCM_ASKPASS";
 const ASKPASS_SECRET: &str = "GCM_ASKPASS_SECRET";
+const ASKPASS_HOST: &str = "GCM_ASKPASS_HOST";
+
+/// Whether an ssh prompt may be answered with the saved password of a
+/// session for `host`. Key passphrases are local and always answered.
+/// Password prompts that name a host (`user@host's password:` or
+/// `(user@host) Password:`) must name this one: a jump host on the way
+/// asks for its own password and must not be given this one. A host alias
+/// from ~/.ssh/config that differs from the real name is then typed by hand.
+pub fn prompt_is_for(prompt: &str, host: &str) -> bool {
+    let line = prompt.trim_end().rsplit('\n').next().unwrap_or("");
+    let lower = line.to_lowercase();
+    if lower.contains("passphrase") {
+        return true;
+    }
+    if !lower.contains("password") {
+        return false;
+    }
+    let Some((_, after)) = line.rsplit_once('@') else {
+        return true;
+    };
+    let named: String = after
+        .chars()
+        .take_while(|c| *c != '\'' && *c != ')' && !c.is_whitespace())
+        .collect();
+    let bare = |h: &str| {
+        h.trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_lowercase()
+    };
+    bare(&named) == bare(host)
+}
 
 /// Entry point when ssh runs this binary as its askpass helper. Answers
 /// password and passphrase prompts with the session's saved password and
@@ -223,9 +277,10 @@ const ASKPASS_SECRET: &str = "GCM_ASKPASS_SECRET";
 /// ssh treats as "no". Returns the process exit code.
 pub fn askpass() -> Option<i32> {
     std::env::var_os(ASKPASS_FLAG)?;
-    let prompt = std::env::args().nth(1).unwrap_or_default().to_lowercase();
+    let prompt = std::env::args().nth(1).unwrap_or_default();
     let secret = std::env::var(ASKPASS_SECRET).unwrap_or_default();
-    if !secret.is_empty() && (prompt.contains("password") || prompt.contains("passphrase")) {
+    let host = std::env::var(ASKPASS_HOST).unwrap_or_default();
+    if !secret.is_empty() && prompt_is_for(&prompt, &host) {
         println!("{secret}");
         Some(0)
     } else {
@@ -235,7 +290,7 @@ pub fn askpass() -> Option<i32> {
 
 /// A command for an ssh-based program running without a terminal (sftp,
 /// tunnels). Prompts go to [`askpass`]; on Windows no console window opens.
-pub fn background_ssh(program: &str, password: &str) -> std::process::Command {
+pub fn background_ssh(program: &str, password: &str, host: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     if let Ok(exe) = std::env::current_exe() {
         cmd.env("SSH_ASKPASS", exe)
@@ -247,7 +302,7 @@ pub fn background_ssh(program: &str, password: &str) -> std::process::Command {
         }
     }
     if !password.is_empty() {
-        cmd.env(ASKPASS_SECRET, password);
+        cmd.env(ASKPASS_SECRET, password).env(ASKPASS_HOST, host);
     }
     #[cfg(windows)]
     {
@@ -374,6 +429,45 @@ pub fn command_schedule(commands: &str, local: bool) -> Vec<(u64, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refuses_option_like_targets() {
+        let settings = Settings::default();
+        let mut s = Session::new(Protocol::Ssh);
+        s.host = "-oProxyCommand=touch /tmp/x".into();
+        assert!(build(&s, &settings).is_err());
+        s.host = "host".into();
+        s.user = "-oProxyCommand=x".into();
+        assert!(build(&s, &settings).is_err());
+        s.user = "bob".into();
+        assert!(build(&s, &settings).is_ok());
+        s.protocol = Protocol::Mosh;
+        s.host = "-x".into();
+        assert!(build(&s, &settings).is_err());
+    }
+
+    #[test]
+    fn password_prompts_for_the_target_only() {
+        assert!(prompt_is_for("bob@web1's password: ", "web1"));
+        assert!(prompt_is_for("(bob@WEB1) Password: ", "web1"));
+        assert!(prompt_is_for("bob@::1's password:", "[::1]"));
+        assert!(!prompt_is_for("bob@bastion's password: ", "web1"));
+        assert!(!prompt_is_for("(bob@bastion) Password:", "web1"));
+        assert!(prompt_is_for("Password: ", "web1"));
+        assert!(prompt_is_for(
+            "Enter passphrase for key '/home/bob/.ssh/id_ed25519': ",
+            "web1"
+        ));
+        assert!(!prompt_is_for(
+            "Are you sure you want to continue connecting?",
+            "web1"
+        ));
+        // Only the last line counts.
+        assert!(!prompt_is_for(
+            "Welcome to bob@web1\nbob@bastion's password:",
+            "web1"
+        ));
+    }
 
     #[test]
     fn ssh_args() {
