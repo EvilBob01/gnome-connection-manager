@@ -278,6 +278,13 @@ pub fn color_hex([r, g, b]: [u8; 3]) -> String {
     format!("#{r:02x}{g:02x}{b:02x}")
 }
 
+/// Sessions read from another program's configuration.
+pub struct Imported {
+    pub sessions: Vec<Session>,
+    /// One line per entry that could not be imported, with the reason.
+    pub skipped: Vec<String>,
+}
+
 pub fn new_id() -> u64 {
     rand::rng().next_u64()
 }
@@ -457,6 +464,33 @@ impl Store {
         self.sessions.iter().find(|s| s.id == id)
     }
 
+    /// True if a session with the same name, place and target already exists.
+    pub fn has_equivalent(&self, s: &Session) -> bool {
+        self.sessions.iter().any(|e| {
+            e.name == s.name
+                && e.folder == s.folder
+                && e.protocol == s.protocol
+                && e.host == s.host
+                && e.effective_port() == s.effective_port()
+                && e.user == s.user
+        })
+    }
+
+    /// Add imported sessions, skipping ones already present. Returns how
+    /// many were added and how many were duplicates.
+    pub fn import(&mut self, sessions: Vec<Session>) -> (usize, usize) {
+        let (mut added, mut dup) = (0, 0);
+        for s in sessions {
+            if self.has_equivalent(&s) {
+                dup += 1;
+            } else {
+                self.sessions.push(s);
+                added += 1;
+            }
+        }
+        (added, dup)
+    }
+
     pub fn upsert(&mut self, session: Session) {
         match self.sessions.iter_mut().find(|s| s.id == session.id) {
             Some(existing) => *existing = session,
@@ -589,6 +623,26 @@ mod tests {
         assert_eq!((s.host.as_str(), s.serial.baud), ("COM3", 9600));
         assert!(Session::from_quick("host:notaport").is_none());
         assert!(Session::from_quick("").is_none());
+    }
+
+    #[test]
+    fn import_skips_duplicates() {
+        let dir = std::env::temp_dir().join(format!("gcm-rs-test-{}", new_id()));
+        let mut store = Store::load(&dir).unwrap();
+        let mut s = Session::new(Protocol::Ssh);
+        s.name = "web".into();
+        s.host = "web1".into();
+        s.port = 22;
+        let mut again = s.clone();
+        again.id = new_id();
+        again.port = 0; // same effective port
+        let mut other = s.clone();
+        other.id = new_id();
+        other.host = "web2".into();
+        assert_eq!(store.import(vec![s]), (1, 0));
+        assert_eq!(store.import(vec![again, other]), (1, 1));
+        assert_eq!(store.sessions.len(), 2);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

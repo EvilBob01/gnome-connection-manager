@@ -5,6 +5,8 @@ mod config;
 mod fonts;
 mod gcm_import;
 mod launch;
+mod mobaxterm;
+mod putty;
 mod sessionlog;
 mod sftp;
 mod terminal;

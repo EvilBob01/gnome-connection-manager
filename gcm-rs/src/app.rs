@@ -40,7 +40,10 @@ enum Modal {
     Settings(Settings),
     ConfirmClose(u64),
     ConfirmDelete(u64),
-    ConfirmImport(Vec<Session>),
+    ConfirmImport {
+        imported: crate::config::Imported,
+        source: String,
+    },
     EditTunnel {
         tunnel: Tunnel,
         is_new: bool,
@@ -66,6 +69,14 @@ pub struct App {
     browsers: std::collections::HashMap<u64, Browser>,
     tunnels: TunnelManager,
     status: Option<(String, bool)>,
+}
+
+#[derive(Clone, Copy)]
+enum ImportSource {
+    Gcm,
+    MobaXterm,
+    PuttyLocal,
+    PuttyReg,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -276,9 +287,7 @@ impl App {
                         .push(Action::Open(Session::new(Protocol::Local)));
                 }
                 ui.separator();
-                if ui.button("Import from GNOME Connection Manager…").clicked() {
-                    self.import_gcm();
-                }
+                ui.menu_button("Import sessions", |ui| self.import_menu(ui));
                 if ui.button("Open log folder").clicked() {
                     let dir = self.store.settings.log_dir();
                     if let Err(e) = std::fs::create_dir_all(&dir)
@@ -458,18 +467,77 @@ impl App {
         }
     }
 
-    fn import_gcm(&mut self) {
-        let Some(path) = gcm_import::default_path() else {
-            self.error("Cannot find the home directory");
-            return;
-        };
-        if !path.exists() {
-            self.error(format!("{} not found", path.display()));
-            return;
+    /// Entries for the Import menus.
+    fn import_menu(&mut self, ui: &mut Ui) {
+        if ui.button("GNOME Connection Manager (~/.gcm)").clicked() {
+            ui.close();
+            self.import_from(ImportSource::Gcm);
         }
-        match gcm_import::import(&path) {
-            Ok(list) if list.is_empty() => self.info("No hosts found in the GCM config"),
-            Ok(list) => self.modal = Some(Modal::ConfirmImport(list)),
+        if ui
+            .button("MobaXterm sessions file (.mxtsessions)…")
+            .clicked()
+        {
+            ui.close();
+            self.import_from(ImportSource::MobaXterm);
+        }
+        if ui
+            .button("PuTTY sessions on this computer")
+            .on_hover_text(crate::putty::local_source())
+            .clicked()
+        {
+            ui.close();
+            self.import_from(ImportSource::PuttyLocal);
+        }
+        if ui.button("PuTTY registry export (.reg)…").clicked() {
+            ui.close();
+            self.import_from(ImportSource::PuttyReg);
+        }
+    }
+
+    fn import_from(&mut self, source: ImportSource) {
+        let pick = |title: &str, name: &str, ext: &[&str]| {
+            rfd::FileDialog::new()
+                .set_title(title)
+                .add_filter(name, ext)
+                .add_filter("All files", &["*"])
+                .pick_file()
+        };
+        let result = match source {
+            ImportSource::Gcm => match gcm_import::default_path().filter(|p| p.exists()) {
+                Some(path) => gcm_import::import(&path).map(|sessions| {
+                    let imported = crate::config::Imported {
+                        sessions,
+                        skipped: Vec::new(),
+                    };
+                    (imported, path.display().to_string())
+                }),
+                None => Err(anyhow::anyhow!("~/.gcm/gcm.conf not found")),
+            },
+            ImportSource::MobaXterm => {
+                let Some(path) = pick(
+                    "Import MobaXterm sessions",
+                    "MobaXterm sessions",
+                    &["mxtsessions", "moba"],
+                ) else {
+                    return;
+                };
+                crate::mobaxterm::import(&path).map(|i| (i, path.display().to_string()))
+            }
+            ImportSource::PuttyLocal => {
+                crate::putty::import_local().map(|i| (i, crate::putty::local_source()))
+            }
+            ImportSource::PuttyReg => {
+                let Some(path) = pick("Import PuTTY sessions", "Registry export", &["reg"]) else {
+                    return;
+                };
+                crate::putty::import_reg(&path).map(|i| (i, path.display().to_string()))
+            }
+        };
+        match result {
+            Ok((imported, _)) if imported.sessions.is_empty() && imported.skipped.is_empty() => {
+                self.info("No sessions found to import")
+            }
+            Ok((imported, source)) => self.modal = Some(Modal::ConfirmImport { imported, source }),
             Err(e) => self.error(format!("Import failed: {e:#}")),
         }
     }
@@ -739,9 +807,7 @@ impl App {
             .show(ui, |ui| {
                 if self.store.sessions.is_empty() {
                     ui.label(RichText::new("No saved sessions yet.").weak());
-                    if ui.link("Import from GNOME Connection Manager").clicked() {
-                        self.import_gcm();
-                    }
+                    ui.menu_button("Import sessions…", |ui| self.import_menu(ui));
                 }
                 self.folder_ui(ui, "", &sessions, !filter.is_empty());
             });
@@ -878,12 +944,8 @@ impl App {
                         save: false,
                     });
                 }
-                if ui
-                    .add_sized(size, egui::Button::new("📥\nImport GCM"))
-                    .clicked()
-                {
-                    self.import_gcm();
-                }
+                let import = ui.add_sized(size, egui::Button::new("📥\nImport…"));
+                egui::Popup::menu(&import).show(|ui| self.import_menu(ui));
             });
             ui.add_space(16.0);
             ui.label(
@@ -1014,27 +1076,64 @@ impl App {
                     self.save();
                 }
             }
-            Modal::ConfirmImport(list) => {
-                let n = list.len();
-                let mut import = false;
-                confirm(
-                    ctx,
-                    "Import",
-                    &format!(
-                        "Import {n} session(s) from {}?",
-                        gcm_import::default_path().unwrap().display()
-                    ),
-                    &mut keep,
-                    || import = true,
-                );
-                if import {
-                    let list = std::mem::take(list);
-                    for s in list {
-                        self.store.upsert(s);
-                    }
-                    self.save();
-                    self.info(format!("Imported {n} session(s)"));
-                }
+            Modal::ConfirmImport { imported, source } => {
+                let new = imported
+                    .sessions
+                    .iter()
+                    .filter(|s| !self.store.has_equivalent(s))
+                    .count();
+                let dup = imported.sessions.len() - new;
+                egui::Window::new("Import sessions")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(RichText::new(source.as_str()).weak().small());
+                        ui.label(format!("{new} new session(s) to import."));
+                        if dup > 0 {
+                            ui.label(format!(
+                                "{dup} already in your list will be left as they are."
+                            ));
+                        }
+                        if !imported.skipped.is_empty() {
+                            egui::CollapsingHeader::new(format!(
+                                "{} entr{} cannot be imported",
+                                imported.skipped.len(),
+                                if imported.skipped.len() == 1 {
+                                    "y"
+                                } else {
+                                    "ies"
+                                }
+                            ))
+                            .show(ui, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .max_height(160.0)
+                                    .show(ui, |ui| {
+                                        for why in &imported.skipped {
+                                            ui.label(RichText::new(why).small());
+                                        }
+                                    });
+                            });
+                        }
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(new > 0, egui::Button::new("Import"))
+                                .clicked()
+                            {
+                                let sessions = std::mem::take(&mut imported.sessions);
+                                let (added, _) = self.store.import(sessions);
+                                self.save();
+                                self.info(format!("Imported {added} session(s)"));
+                                keep = false;
+                            }
+                            if ui.button("Cancel").clicked()
+                                || ui.input(|i| i.key_pressed(Key::Escape))
+                            {
+                                keep = false;
+                            }
+                        });
+                    });
             }
             Modal::EditTunnel { tunnel, is_new } => {
                 let title = if *is_new { "New tunnel" } else { "Edit tunnel" };

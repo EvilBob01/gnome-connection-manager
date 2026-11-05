@@ -44,10 +44,33 @@ It lives next to the original Python app while it matures.
 - **Password autofill**: replaces `ssh.expect`. A saved password is typed when the server first prints
   `password:`, and autofill switches off as soon as you type anything yourself.
 - **Startup commands** per session, using GCM's `##D=<ms>` delay syntax.
-- **Import from GCM**: *Session → Import from GNOME Connection Manager* reads `~/.gcm/gcm.conf`, including
-  its encrypted passwords.
+- **Import** from GNOME Connection Manager, MobaXterm and PuTTY (*Session → Import sessions*). See *Importing*
+  below.
 - **Terminal**: alacritty's VT engine with 256 colours and truecolour, mouse reporting (mc, htop, vim),
   bracketed paste, scrollback, and fallback fonts for CJK and symbols.
+
+## Importing
+
+*Session → Import sessions* (or *Import…* on the start screen) shows what it found before adding anything.
+Sessions already in your list (same name, folder, host, port and user) are left alone, so importing again is
+safe. Anything that can't be imported is listed with the reason.
+
+| Source | What is read |
+|---|---|
+| **GNOME Connection Manager** | `~/.gcm/gcm.conf`: hosts, folders, saved passwords, tunnels, startup commands, colours, log flag. |
+| **MobaXterm** | A `.mxtsessions` export (*Sessions → Export*): SSH, SFTP, RDP and VNC sessions with their folders, user, port, private key, jump hosts, X11/compression, login command, comment, colours and log flag. |
+| **PuTTY** (this computer) | On Windows the registry (`HKCU\Software\SimonTatham\PuTTY\Sessions`, read with `reg export`); elsewhere `~/.putty/sessions`. SSH, Telnet and serial sessions with user, port, key, X11/agent forwarding, compression, keep-alive, port forwards, colours and log flag. They go in a *PuTTY* folder. |
+| **PuTTY `.reg` file** | The same, from a registry export made on another machine: `reg export HKCU\Software\SimonTatham\PuTTY\Sessions putty.reg`. KiTTY exports work too. |
+
+Notes:
+
+- MobaXterm's session format isn't documented. The importer follows the community write-up of
+  [the `.mxtsessions` format](https://gist.github.com/Ruzgfpegk/ab597838e4abbe8de30d7224afd062ea). Telnet,
+  serial and local-shell entries aren't covered there, so they are listed as not imported rather than
+  guessed at.
+- Neither MobaXterm nor PuTTY exports passwords. Saved PuTTY keys are `.ppk` files, which OpenSSH can't
+  read: convert them with `puttygen key.ppk -O private-openssh -o key` and point the session at the result.
+- PuTTY's rlogin, raw and SUPDUP sessions have no equivalent here and are skipped.
 
 ## Keys and mouse
 
@@ -215,6 +238,8 @@ when no password is saved. Defaults:
 | `src/launch.rs` | Session → command line (ssh/telnet args, RDP/VNC templates), askpass helper |
 | `src/config.rs` | Sessions, settings, TOML storage, password encryption |
 | `src/gcm_import.rs` | Reader for the original GCM config and its pyAES passwords |
+| `src/mobaxterm.rs` | Reader for MobaXterm `.mxtsessions` exports |
+| `src/putty.rs` | Reader for PuTTY sessions (registry export, `.reg` files, `~/.putty/sessions`) |
 | `src/fonts.rs` | System fallback fonts |
 
 `cargo test` covers argument building, quick-connect parsing, key encoding, autofill, config round-trips
