@@ -55,6 +55,12 @@ It lives next to the original Python app while it matures.
   below.
 - **Terminal**: alacritty's VT engine with 256 colours and truecolour, mouse reporting (mc, htop, vim),
   bracketed paste, scrollback, and fallback fonts for CJK and symbols.
+- **Input methods (IME)**: type Chinese, Japanese, Korean and other composed text into terminals with
+  your system's input method (IBus, Fcitx, the Windows IME, …). The text being composed is shown at the
+  cursor and the candidate window opens there; only the finished text is sent. *Settings → Input method*
+  is *Auto* by default. That means on for Windows, macOS and Wayland, and on X11 only when an input method
+  is configured (`XMODIFIERS`, `GTK_IM_MODULE` or `QT_IM_MODULE`), because input-method mode with no IM
+  server running can swallow key presses on X11. *On* and *Off* override it.
 
 ## Importing
 
@@ -232,7 +238,8 @@ when no password is saved. Defaults:
 
 ## Not yet
 
-- IME input inside terminal tabs
+- MobaXterm Telnet, serial and local-shell sessions on import (their export format isn't documented;
+  a sample exported line would make them possible).
 
 ## Code layout
 

@@ -18,7 +18,7 @@ use alacritty_terminal::vte::ansi::{
 };
 use anyhow::{Context as _, Result};
 use eframe::egui::{
-    self, Align2, Color32, Event, EventFilter, FontId, Key, Modifiers, MouseWheelUnit,
+    self, Align2, Color32, Event, EventFilter, FontId, ImeEvent, Key, Modifiers, MouseWheelUnit,
     PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -363,6 +363,8 @@ pub struct Terminal {
     scheduled: Vec<(Instant, String)>,
     mouse_buttons: u8,
     focus_pending: bool,
+    /// Text being composed in the input method, shown at the cursor.
+    preedit: String,
     /// User input since the app last called `take_input`.
     recorded: Vec<Input>,
 }
@@ -574,6 +576,7 @@ impl Terminal {
             scheduled: Vec::new(),
             mouse_buttons: 0,
             focus_pending: true,
+            preedit: String::new(),
             recorded: Vec::new(),
         }
     }
@@ -708,6 +711,7 @@ impl Terminal {
         dark: bool,
         copy_on_select: bool,
         paste_on_right_click: bool,
+        ime: bool,
     ) {
         self.shared.dark.store(dark, Ordering::Relaxed);
         let now = Instant::now();
@@ -776,7 +780,35 @@ impl Terminal {
         if focused {
             self.handle_keys(ui);
         }
+        if !focused {
+            self.preedit.clear();
+        } else if ime {
+            // Ask for the platform input method, with its candidate window at the cursor.
+            let cursor = self.cursor_rect(rect, cell);
+            ui.ctx().output_mut(|o| {
+                o.ime = Some(egui::output::IMEOutput {
+                    purpose: egui::IMEPurpose::Terminal,
+                    rect,
+                    cursor_rect: cursor,
+                    should_interrupt_composition: false,
+                })
+            });
+        }
         self.paint(ui, rect, cell, &font, dark, focused);
+    }
+
+    /// Screen rectangle of the cell under the terminal cursor.
+    fn cursor_rect(&self, rect: Rect, cell: Vec2) -> Rect {
+        let term = self.term.lock().unwrap();
+        let point = term.grid().cursor.point;
+        let row = point.line.0 + term.grid().display_offset() as i32;
+        Rect::from_min_size(
+            pos2(
+                rect.left() + point.column.0 as f32 * cell.x,
+                rect.top() + row as f32 * cell.y,
+            ),
+            cell,
+        )
     }
 
     fn cell_at(&self, rect: Rect, cell: Vec2, pos: Pos2) -> (usize, usize, Side) {
@@ -1001,6 +1033,14 @@ impl Terminal {
                         self.input(Input::Bytes(b"\x16".to_vec()));
                     } else {
                         self.input(Input::Paste(text));
+                    }
+                }
+                // Input method: show the composition, send the result.
+                Event::Ime(ImeEvent::Preedit { text, .. }) => self.preedit = text,
+                Event::Ime(ImeEvent::Commit(text)) => {
+                    self.preedit.clear();
+                    if !text.is_empty() {
+                        self.input(Input::Bytes(text.into_bytes()));
                     }
                 }
                 // Alt+key is sent as ESC+key from the Key event; Ctrl+Alt is AltGr on Windows.
@@ -1232,6 +1272,28 @@ impl Terminal {
                     );
                 }
             }
+        }
+
+        if !self.preedit.is_empty() && focused {
+            // Composition in progress: draw it over the cursor, underlined.
+            let at = Rect::from_min_size(
+                pos2(
+                    origin.x + cursor.point.column.0 as f32 * cell.x,
+                    origin.y + (cursor.point.line.0 + offset) as f32 * cell.y,
+                ),
+                cell,
+            );
+            let galley = painter.layout_no_wrap(self.preedit.clone(), font.clone(), default_bg);
+            let bg = Rect::from_min_size(at.min, vec2(galley.size().x.max(cell.x), cell.y));
+            painter.rect_filled(bg, 0.0, resolve(AnsiColor::Named(NamedColor::Foreground)));
+            painter.galley(at.min, galley, default_bg);
+            painter.line_segment(
+                [
+                    pos2(bg.left(), bg.bottom() - 1.0),
+                    pos2(bg.right(), bg.bottom() - 1.0),
+                ],
+                Stroke::new(1.0, default_bg),
+            );
         }
 
         if offset > 0 {
@@ -1491,6 +1553,58 @@ mod tests {
         armed.store(false, Ordering::Relaxed);
         a.feed(b"Password: ", &writer, &armed);
         assert_eq!(&*buf.lock().unwrap(), b"bob\rpw\r");
+    }
+
+    /// Drive a real terminal (running `cat`) through egui with input-method
+    /// events, as egui-winit would deliver them.
+    #[cfg(unix)]
+    #[test]
+    fn input_method() {
+        let ctx = egui::Context::default();
+        let mut term = Terminal::spawn_pty(&ctx, "cat", &[], Autofill::default(), 100).unwrap();
+        let frame = |events: Vec<Event>, ime: bool, term: &mut Terminal| {
+            let input = egui::RawInput {
+                events,
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| term.ui(ui, 14.0, true, false, false, ime));
+            // No renderer here to hand font textures to.
+            out.textures_delta.clear();
+            out
+        };
+        // First frames: layout and take focus.
+        frame(vec![], true, &mut term);
+        let out = frame(vec![], true, &mut term);
+        let ime = out
+            .platform_output
+            .ime
+            .expect("a focused terminal asks for the IME");
+        assert_eq!(ime.purpose, egui::IMEPurpose::Terminal);
+        assert!(ime.rect.contains_rect(ime.cursor_rect));
+
+        let preedit = Event::Ime(ImeEvent::Preedit {
+            text: "にほん".into(),
+            active_range_chars: None,
+        });
+        frame(vec![preedit], true, &mut term);
+        assert_eq!(term.preedit, "にほん");
+        assert!(term.take_input().is_empty(), "composition is not sent");
+
+        frame(
+            vec![Event::Ime(ImeEvent::Commit("日本".into()))],
+            true,
+            &mut term,
+        );
+        assert!(term.preedit.is_empty());
+        assert_eq!(
+            term.take_input(),
+            [Input::Bytes("日本".as_bytes().to_vec())]
+        );
+
+        // With the IME off nothing is requested from the platform.
+        let out = frame(vec![], false, &mut term);
+        assert!(out.platform_output.ime.is_none());
     }
 
     #[test]

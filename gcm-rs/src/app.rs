@@ -1680,6 +1680,19 @@ fn settings_form(ui: &mut Ui, s: &mut Settings) {
                     &mut s.open_local_on_startup,
                     "Open a local shell on startup",
                 );
+                ui.horizontal(|ui| {
+                    use crate::config::ImeMode;
+                    ui.label("Input method (IME) in terminals:");
+                    for (mode, label) in [(ImeMode::Auto, "Auto"), (ImeMode::On, "On"), (ImeMode::Off, "Off")] {
+                        ui.radio_value(&mut s.ime, mode, label);
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "For typing Chinese, Japanese, Korean and other composed text. Auto turns it on \
+                     on Windows, macOS and Wayland, and on X11 when an input method such as IBus or \
+                     Fcitx is configured.",
+                );
             });
             ui.end_row();
             ui.label("SSH command");
@@ -1799,6 +1812,7 @@ impl TabViewer for Viewer<'_> {
             s.dark_mode,
             s.copy_on_select,
             s.paste_on_right_click,
+            s.ime_enabled(),
         );
         if self.multiexec && tab.in_group {
             // Make it obvious which terminals will receive keystrokes.

@@ -247,6 +247,39 @@ impl Session {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ImeMode {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+/// For `ImeMode::Auto`: is there an input method to talk to? Windows,
+/// macOS and Wayland always have one. On X11, enabling input-method mode
+/// with no IM server running can swallow key presses, so only do it when
+/// one is configured.
+fn ime_available() -> bool {
+    use std::sync::OnceLock;
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let var = |k: &str| std::env::var(k).unwrap_or_default();
+        ime_available_from(cfg!(unix) && !cfg!(target_os = "macos"), &var)
+    })
+}
+
+fn ime_available_from(x11_or_wayland: bool, var: &dyn Fn(&str) -> String) -> bool {
+    if !x11_or_wayland || !var("WAYLAND_DISPLAY").is_empty() {
+        return true;
+    }
+    let xmod = var("XMODIFIERS");
+    (xmod.contains("@im=") && !xmod.contains("@im=none"))
+        || ["GTK_IM_MODULE", "QT_IM_MODULE"]
+            .iter()
+            .any(|k| !matches!(var(k).as_str(), "" | "none" | "xim"))
+}
+
 /// Parse a colour as `#rgb`, `#rrggbb`, `#rrrgggbbb`, `#rrrrggggbbbb` (what
 /// GTK accepts, and so what GCM saved) or `rgb(r,g,b)` / `rgba(r,g,b,a)`.
 pub fn parse_color(s: &str) -> Option<[u8; 3]> {
@@ -323,12 +356,23 @@ pub struct Settings {
     pub font_path: String,
     /// Where session logs go; empty means `logs` in the config folder.
     pub log_dir: String,
+    /// Input method (IME) for typing e.g. Chinese or Japanese into terminals.
+    pub ime: ImeMode,
     pub sidebar_width: f32,
     /// Folders the user collapsed in the session tree.
     pub collapsed: Vec<String>,
 }
 
 impl Settings {
+    /// Whether terminals should enable the platform input method.
+    pub fn ime_enabled(&self) -> bool {
+        match self.ime {
+            ImeMode::On => true,
+            ImeMode::Off => false,
+            ImeMode::Auto => ime_available(),
+        }
+    }
+
     pub fn log_dir(&self) -> PathBuf {
         if self.log_dir.is_empty() {
             config_dir().join("logs")
@@ -377,6 +421,7 @@ impl Default for Settings {
             },
             font_path: String::new(),
             log_dir: String::new(),
+            ime: ImeMode::Auto,
             sidebar_width: 240.0,
             collapsed: Vec::new(),
         }
@@ -599,6 +644,41 @@ mod tests {
         let again = Store::load(&dir).unwrap();
         assert_eq!(again.sessions[0].password, "s3cret ü");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ime_auto_detection() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| v.to_string())
+                    .unwrap_or_default()
+            }
+        };
+        assert!(
+            ime_available_from(false, &env(&[])),
+            "Windows/macOS always have an IME"
+        );
+        assert!(ime_available_from(
+            true,
+            &env(&[("WAYLAND_DISPLAY", "wayland-0")])
+        ));
+        assert!(ime_available_from(
+            true,
+            &env(&[("XMODIFIERS", "@im=ibus")])
+        ));
+        assert!(ime_available_from(
+            true,
+            &env(&[("GTK_IM_MODULE", "fcitx")])
+        ));
+        assert!(!ime_available_from(true, &env(&[])), "bare X11");
+        assert!(!ime_available_from(
+            true,
+            &env(&[("XMODIFIERS", "@im=none")])
+        ));
+        assert!(!ime_available_from(true, &env(&[("GTK_IM_MODULE", "xim")])));
     }
 
     #[test]
