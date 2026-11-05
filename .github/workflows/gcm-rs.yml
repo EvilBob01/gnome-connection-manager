@@ -1,0 +1,61 @@
+name: gcm-rs
+
+on:
+  push:
+    paths: ["gcm-rs/**", ".github/workflows/gcm-rs.yml"]
+  pull_request:
+    paths: ["gcm-rs/**", ".github/workflows/gcm-rs.yml"]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            bin: gcm-rs
+          - os: windows-latest
+            bin: gcm-rs.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: gcm-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: gcm-rs
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gcm-rs-${{ runner.os }}
+          path: gcm-rs/target/release/${{ matrix.bin }}
+      - name: Install packaging tools
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm,cargo-zigbuild
+      - name: Build .deb and .rpm (against glibc 2.28)
+        if: runner.os == 'Linux'
+        run: |
+          pip install ziglang
+          cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
+          # The packages promise glibc >= 2.28; fail if a change raises that.
+          newest=$(objdump -T target/x86_64-unknown-linux-gnu/release/gcm-rs | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "newest glibc symbol: $newest"
+          test "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" = GLIBC_2.28
+          cargo deb --no-build --target x86_64-unknown-linux-gnu
+          cargo generate-rpm --target x86_64-unknown-linux-gnu --payload-compress gzip
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: gcm-rs-packages
+          path: |
+            gcm-rs/target/x86_64-unknown-linux-gnu/debian/*.deb
+            gcm-rs/target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm

@@ -1,0 +1,90 @@
+.TH GCM-RS 1 "November 2026" "gcm-rs 0.1.0" "User Commands"
+.SH NAME
+gcm-rs \- tabbed SSH, SFTP, Telnet, serial, RDP and VNC connection manager
+.SH SYNOPSIS
+.B gcm-rs
+[\fISESSION\fR | [\fIproto\fB://\fR][\fIuser\fB@\fR]\fIhost\fR[\fB:\fIport\fR]]...
+.br
+.B gcm-rs
+.BR \-\-help " | " \-\-version
+.SH DESCRIPTION
+.B gcm-rs
+is a graphical connection manager in the style of MobaXterm, and a rewrite of
+GNOME Connection Manager. It keeps saved sessions in a folder tree and opens
+them in tabs that can be split.
+.PP
+Terminal sessions run the system's own clients
+.RB ( ssh ,
+.BR mosh ,
+a local shell) in a pseudo-terminal, so
+.IR ~/.ssh/config ,
+keys, the agent and
+.I known_hosts
+work as usual. Telnet uses a built-in client (the system
+.B telnet
+can be chosen in Settings). Serial ports are opened directly. RDP and VNC sessions start
+an external client from a configurable command template.
+.PP
+It also has an SFTP side browser (using
+.BR sftp (1)),
+a tunnel manager for local, remote and SOCKS forwards (using
+.BR "ssh \-N" ),
+MultiExec for typing into several terminals at once, per-session colours, and
+plain-text session logs.
+.SH ARGUMENTS
+Each argument opens a tab: the name of a saved session, or an address in
+quick-connect form. The protocol defaults to
+.BR ssh ;
+.BR mosh:// ,
+.BR telnet:// ,
+.BR rdp:// ,
+.B vnc://
+and
+.B serial://
+select another, e.g.
+.B serial:///dev/ttyUSB0:115200
+or
+.BR telnet://router .
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Show a short usage summary.
+.TP
+.BR \-V ", " \-\-version
+Show the version.
+.SH FILES
+.TP
+.I ~/.config/gcm-rs/gcm.toml
+Sessions, tunnels and settings (plain TOML).
+.TP
+.I ~/.config/gcm-rs/key
+Random key used to encrypt saved passwords in
+.IR gcm.toml ,
+or, with a master password, the salt from which the key is derived (Argon2id).
+Without a master password anyone who can read both files can recover the
+passwords; prefer SSH keys.
+.TP
+.I ~/.config/gcm-rs/layout.json
+Open tabs and split layout, when Settings asks for them to be reopened.
+.TP
+.I ~/.config/gcm-rs/logs/
+Default folder for session logs.
+.TP
+.I ~/.gcm/gcm.conf
+Configuration of the original GNOME Connection Manager, which can be imported
+from the Session menu.
+.SH ENVIRONMENT
+.TP
+.B SHELL
+The shell started for local sessions, unless set in Settings.
+.TP
+.B RUST_LOG
+Log level for diagnostics on standard error, e.g.
+.BR RUST_LOG=debug .
+.SH SEE ALSO
+.BR ssh (1),
+.BR sftp (1),
+.BR mosh (1),
+.BR telnet (1),
+.BR xfreerdp (1),
+.BR vncviewer (1)

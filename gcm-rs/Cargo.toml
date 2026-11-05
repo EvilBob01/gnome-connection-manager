@@ -1,0 +1,104 @@
+[package]
+name = "gcm-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Tabbed connection manager (SSH, SFTP, Telnet, serial, RDP, VNC) for Linux and Windows"
+license = "GPL-3.0-only"
+repository = "https://github.com/EvilBob01/gnome-connection-manager"
+readme = "README.md"
+
+[[bin]]
+name = "gcm-rs"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+arboard = "3"
+egui_extras = "0.36"
+rfd = "0.17"
+argon2 = "0.5"
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+egui_dock = { version = "0.21", features = ["serde"] }
+alacritty_terminal = "0.26"
+portable-pty = "0.9"
+serialport = { version = "4", default-features = false }
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+dirs = "6"
+shlex = "1"
+anyhow = "1"
+aes-gcm = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+# `cargo deb` (cargo-deb) and `cargo generate-rpm` (cargo-generate-rpm) build
+# the Linux packages from a release build; see README "Packages".
+[package.metadata.deb]
+maintainer = "EvilBob01 <EvilBob01@users.noreply.github.com>"
+copyright = "2020 Renzo Bertuzzi L., 2026 gcm-rs contributors"
+license-file = ["LICENSE", "0"]
+section = "net"
+priority = "optional"
+extended-description = """\
+A MobaXterm-style rewrite of GNOME Connection Manager: saved sessions in a \
+folder tree, tabbed and splittable terminals for SSH, Telnet, serial ports and \
+local shells, an SFTP side browser, a tunnel manager, MultiExec, per-session \
+colours and session logs. RDP and VNC open in an external client. It uses the \
+system ssh, so ssh config, keys and the agent work as usual, and it can import \
+sessions from the original GNOME Connection Manager."""
+# Packages are built against glibc 2.28 (cargo zigbuild, see README), so state
+# that rather than what dpkg-shlibdeps infers from the build host. winit loads
+# the other three at run time, where dpkg-shlibdeps cannot see them.
+depends = "libc6 (>= 2.28), libxkbcommon-x11-0, libgl1, libegl1"
+recommends = "openssh-client, xdg-utils, fonts-dejavu-core"
+suggests = "telnet, freerdp3-x11 | freerdp2-x11, tigervnc-viewer, fonts-noto-cjk"
+assets = [
+    ["target/release/gcm-rs", "usr/bin/", "755"],
+    ["packaging/gcm-rs.desktop", "usr/share/applications/", "644"],
+    ["packaging/gcm-rs.png", "usr/share/icons/hicolor/128x128/apps/", "644"],
+    ["packaging/gcm-rs.1", "usr/share/man/man1/", "644"],
+    ["README.md", "usr/share/doc/gcm-rs/", "644"],
+]
+
+[package.metadata.generate-rpm]
+license = "GPL-3.0-only"
+summary = "Tabbed SSH, SFTP, Telnet, serial, RDP and VNC connection manager"
+assets = [
+    { source = "target/release/gcm-rs", dest = "/usr/bin/gcm-rs", mode = "755" },
+    { source = "packaging/gcm-rs.desktop", dest = "/usr/share/applications/gcm-rs.desktop", mode = "644" },
+    { source = "packaging/gcm-rs.png", dest = "/usr/share/icons/hicolor/128x128/apps/gcm-rs.png", mode = "644" },
+    { source = "packaging/gcm-rs.1", dest = "/usr/share/man/man1/gcm-rs.1", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/gcm-rs/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/licenses/gcm-rs/LICENSE", mode = "644", doc = true },
+]
+
+# Loaded at run time by winit; named by soname so they resolve on Fedora,
+# RHEL and openSUSE alike.
+[package.metadata.generate-rpm.requires]
+"libxkbcommon-x11.so.0()(64bit)" = "*"
+"libGL.so.1()(64bit)" = "*"
+"libEGL.so.1()(64bit)" = "*"
+
+[package.metadata.generate-rpm.recommends]
+openssh-clients = "*"
+xdg-utils = "*"
+
+[package.metadata.generate-rpm.suggests]
+telnet = "*"
+freerdp = "*"
+tigervnc = "*"
