@@ -15,12 +15,14 @@ them in tabs that can be split.
 .PP
 Terminal sessions run the system's own clients
 .RB ( ssh ,
-.BR telnet ,
+.BR mosh ,
 a local shell) in a pseudo-terminal, so
 .IR ~/.ssh/config ,
 keys, the agent and
 .I known_hosts
-work as usual. Serial ports are opened directly. RDP and VNC sessions start
+work as usual. Telnet uses a built-in client (the system
+.B telnet
+can be chosen in Settings). Serial ports are opened directly. RDP and VNC sessions start
 an external client from a configurable command template.
 .PP
 It also has an SFTP side browser (using
@@ -33,6 +35,7 @@ plain-text session logs.
 Each argument opens a tab: the name of a saved session, or an address in
 quick-connect form. The protocol defaults to
 .BR ssh ;
+.BR mosh:// ,
 .BR telnet:// ,
 .BR rdp:// ,
 .B vnc://
@@ -76,6 +79,7 @@ Log level for diagnostics on standard error, e.g.
 .SH SEE ALSO
 .BR ssh (1),
 .BR sftp (1),
+.BR mosh (1),
 .BR telnet (1),
 .BR xfreerdp (1),
 .BR vncviewer (1)

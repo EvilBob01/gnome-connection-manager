@@ -9,6 +9,7 @@ mod mobaxterm;
 mod putty;
 mod sessionlog;
 mod sftp;
+mod telnet;
 mod terminal;
 mod tunnel;
 

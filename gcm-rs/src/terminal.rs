@@ -156,6 +156,133 @@ impl Backend for SerialBackend {
     }
 }
 
+/// The built-in Telnet connection as seen from the terminal: filled in by
+/// the reader thread once connected. Input typed before that is queued.
+struct TelnetLink {
+    writer: Option<crate::telnet::Writer>,
+    control: Option<crate::telnet::Control>,
+    queued: Vec<u8>,
+    size: (u16, u16),
+    closed: bool,
+}
+
+enum TelnetPhase {
+    /// Next read prints "Connecting…".
+    Announce,
+    /// Next read connects.
+    Connect,
+    Connected(crate::telnet::Reader),
+    /// The error to show, then end of stream.
+    Failed(Option<Vec<u8>>),
+}
+
+/// Connects on the reader thread, then reads from the connection.
+struct TelnetConnect {
+    host: String,
+    port: u16,
+    link: Arc<Mutex<TelnetLink>>,
+    phase: TelnetPhase,
+}
+
+impl TelnetConnect {
+    fn emit(out: &mut [u8], msg: &[u8]) -> usize {
+        let n = out.len().min(msg.len());
+        out[..n].copy_from_slice(&msg[..n]);
+        n
+    }
+}
+
+impl Read for TelnetConnect {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match &mut self.phase {
+                TelnetPhase::Connected(r) => return r.read(out),
+                TelnetPhase::Failed(msg) => {
+                    return Ok(msg.take().map(|m| Self::emit(out, &m)).unwrap_or(0));
+                }
+                TelnetPhase::Announce => {
+                    self.phase = TelnetPhase::Connect;
+                    let msg = format!("Connecting to {}:{}…\r\n", self.host, self.port);
+                    return Ok(Self::emit(out, msg.as_bytes()));
+                }
+                TelnetPhase::Connect => {
+                    let (cols, rows) = self.link.lock().unwrap().size;
+                    self.phase = match crate::telnet::connect(&self.host, self.port, cols, rows) {
+                        Ok((reader, mut writer, control)) => {
+                            let mut link = self.link.lock().unwrap();
+                            if link.closed {
+                                // The tab was closed while connecting.
+                                control.close();
+                                TelnetPhase::Failed(None)
+                            } else {
+                                let _ = writer.write_all(&std::mem::take(&mut link.queued));
+                                link.writer = Some(writer);
+                                link.control = Some(control);
+                                TelnetPhase::Connected(reader)
+                            }
+                        }
+                        Err(e) => {
+                            let msg = format!(
+                                "\x1b[31mCannot connect to {}:{}: {e}\x1b[0m\r\n",
+                                self.host, self.port
+                            );
+                            TelnetPhase::Failed(Some(msg.into_bytes()))
+                        }
+                    };
+                }
+            }
+        }
+    }
+}
+
+struct TelnetWrite {
+    link: Arc<Mutex<TelnetLink>>,
+}
+
+impl Write for TelnetWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut link = self.link.lock().unwrap();
+        match link.writer.as_mut() {
+            Some(w) => w.write(buf),
+            None => {
+                link.queued.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.link.lock().unwrap().writer.as_mut() {
+            Some(w) => w.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+struct TelnetBackend {
+    link: Arc<Mutex<TelnetLink>>,
+}
+
+impl Backend for TelnetBackend {
+    fn resize(&mut self, cols: u16, rows: u16) {
+        let mut link = self.link.lock().unwrap();
+        link.size = (cols, rows);
+        if let Some(c) = link.control.as_ref() {
+            c.resize(cols, rows);
+        }
+    }
+    fn exited(&mut self) -> bool {
+        false
+    }
+    fn kill(&mut self) {
+        let mut link = self.link.lock().unwrap();
+        link.closed = true;
+        if let Some(c) = link.control.as_ref() {
+            c.close();
+        }
+    }
+}
+
 /// Serial reads time out so the thread can notice it was asked to stop.
 struct SerialReader {
     port: Box<dyn serialport::SerialPort>,
@@ -267,10 +394,14 @@ impl Terminal {
         if let Some(home) = dirs::home_dir() {
             cmd.cwd(home);
         }
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .with_context(|| format!("starting {program}"))?;
+        let child = pair.slave.spawn_command(cmd).map_err(|e| {
+            // portable-pty lists the whole PATH when the program is missing.
+            if e.to_string().contains("No viable candidates") {
+                anyhow::anyhow!("{program} was not found (not installed, or not on PATH)")
+            } else {
+                e.context(format!("starting {program}"))
+            }
+        })?;
         drop(pair.slave);
         let reader = pair.master.try_clone_reader()?;
         let writer = pair.master.take_writer()?;
@@ -341,6 +472,45 @@ impl Terminal {
             scrollback,
             size,
         ))
+    }
+
+    /// A Telnet session using the built-in client. Connecting happens on the
+    /// reader thread, so the window stays responsive and a failure shows in
+    /// the tab.
+    pub fn open_telnet(
+        ctx: &egui::Context,
+        host: &str,
+        port: u16,
+        autofill: Autofill,
+        scrollback: usize,
+    ) -> Self {
+        let link = Arc::new(Mutex::new(TelnetLink {
+            writer: None,
+            control: None,
+            queued: Vec::new(),
+            size: (80, 24),
+            closed: false,
+        }));
+        let reader = TelnetConnect {
+            host: host.to_string(),
+            port,
+            link: link.clone(),
+            phase: TelnetPhase::Announce,
+        };
+        let writer = TelnetWrite { link: link.clone() };
+        let size = TermSize {
+            cols: 80,
+            lines: 24,
+        };
+        Self::start(
+            ctx,
+            Box::new(reader),
+            Box::new(writer),
+            Box::new(TelnetBackend { link }),
+            autofill,
+            scrollback,
+            size,
+        )
     }
 
     fn start(

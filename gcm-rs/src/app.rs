@@ -176,6 +176,17 @@ impl App {
                 device,
                 settings: s,
             } => Terminal::open_serial(ctx, &device, &s, settings.scrollback).map(Some),
+            Launch::Telnet {
+                host,
+                port,
+                autofill,
+            } => Ok(Some(Terminal::open_telnet(
+                ctx,
+                &host,
+                port,
+                autofill,
+                settings.scrollback,
+            ))),
             Launch::External { program, args } => {
                 launch::spawn_external(&program, &args).map(|_| None)
             }
@@ -213,7 +224,18 @@ impl App {
                 None
             }
             Err(e) => {
-                self.error(format!("{}: {e:#}", session.display_name()));
+                let mut msg = format!("{}: {e:#}", session.display_name());
+                let missing = msg.contains("No such file")
+                    || msg.contains("cannot find")
+                    || msg.contains("not found");
+                if session.protocol == Protocol::Mosh && missing {
+                    msg.push_str(if cfg!(windows) {
+                        " (Windows has no native mosh; install it in WSL or Cygwin and set Settings > Mosh command)"
+                    } else {
+                        " (install the mosh package, e.g. apt/dnf install mosh)"
+                    });
+                }
+                self.error(msg);
                 None
             }
         }
@@ -389,7 +411,7 @@ impl App {
             ui.label("Quick connect:");
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut self.quick)
-                    .hint_text("user@host:port   telnet://host   rdp://host")
+                    .hint_text("user@host:port   mosh://host   telnet://host   rdp://host")
                     .desired_width(280.0),
             );
             let go = ui.button("Connect").clicked()
@@ -725,14 +747,17 @@ impl App {
             .dock
             .find_active_focused()
             .map(|(_, tab)| (tab.id, tab.session.clone()));
-        let Some((id, session)) = active.filter(|(_, s)| s.protocol == Protocol::Ssh) else {
+        // Mosh hosts are reached over SSH too, so they can be browsed the same way.
+        let Some((id, session)) =
+            active.filter(|(_, s)| matches!(s.protocol, Protocol::Ssh | Protocol::Mosh))
+        else {
             ui.label(RichText::new("Select an SSH tab to browse its files.").weak());
             return;
         };
         ui.label(
             RichText::new(format!(
                 "{} {}",
-                Protocol::Ssh.icon(),
+                session.protocol.icon(),
                 session.display_name()
             ))
             .strong(),
@@ -911,7 +936,9 @@ impl App {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.2);
             ui.heading(RichText::new("GNOME Connection Manager").size(28.0));
-            ui.label(RichText::new("SSH · Telnet · Serial · RDP · VNC · Local shell").weak());
+            ui.label(
+                RichText::new("SSH · Mosh · Telnet · Serial · RDP · VNC · Local shell").weak(),
+            );
             ui.add_space(24.0);
             ui.horizontal(|ui| {
                 let w = 520.0_f32.min(ui.available_width());
@@ -1419,6 +1446,19 @@ fn session_form(ui: &mut Ui, s: &mut Session, folders: &[String]) {
                 }
             }
 
+            if s.protocol == Protocol::Mosh {
+                ui.label("Private key");
+                ui.add(
+                    egui::TextEdit::singleline(&mut s.private_key).hint_text("~/.ssh/id_ed25519"),
+                );
+                ui.end_row();
+                ui.label("Mosh options");
+                ui.add(
+                    egui::TextEdit::singleline(&mut s.extra_args)
+                        .hint_text("e.g. --predict=always --server=/usr/local/bin/mosh-server"),
+                );
+                ui.end_row();
+            }
             if s.protocol == Protocol::Ssh {
                 ui.label("Private key");
                 ui.add(
@@ -1456,7 +1496,10 @@ fn session_form(ui: &mut Ui, s: &mut Session, folders: &[String]) {
             }
             if matches!(s.protocol, Protocol::Ssh | Protocol::Telnet) {
                 ui.label("Extra arguments");
-                ui.text_edit_singleline(&mut s.extra_args);
+                let r = ui.text_edit_singleline(&mut s.extra_args);
+                if s.protocol == Protocol::Telnet {
+                    r.on_hover_text("Only used with the system telnet program (Settings)");
+                }
                 ui.end_row();
             }
             if !s.protocol.is_external() {
@@ -1642,8 +1685,20 @@ fn settings_form(ui: &mut Ui, s: &mut Settings) {
             ui.label("SSH command");
             ui.text_edit_singleline(&mut s.ssh_command);
             ui.end_row();
-            ui.label("Telnet command");
-            ui.text_edit_singleline(&mut s.telnet_command);
+            ui.label("Telnet");
+            ui.vertical(|ui| {
+                ui.checkbox(
+                    &mut s.use_system_telnet,
+                    "Use the system telnet program instead of the built-in client",
+                );
+                ui.add_enabled(
+                    s.use_system_telnet,
+                    egui::TextEdit::singleline(&mut s.telnet_command),
+                );
+            });
+            ui.end_row();
+            ui.label("Mosh command");
+            ui.text_edit_singleline(&mut s.mosh_command);
             ui.end_row();
             ui.label("SFTP command");
             ui.text_edit_singleline(&mut s.sftp_command);

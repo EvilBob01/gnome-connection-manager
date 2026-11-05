@@ -26,11 +26,13 @@ pub enum Protocol {
     Rdp,
     Vnc,
     Local,
+    Mosh,
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 6] = [
+    pub const ALL: [Protocol; 7] = [
         Protocol::Ssh,
+        Protocol::Mosh,
         Protocol::Telnet,
         Protocol::Serial,
         Protocol::Rdp,
@@ -46,6 +48,7 @@ impl Protocol {
             Protocol::Rdp => "RDP",
             Protocol::Vnc => "VNC",
             Protocol::Local => "Local shell",
+            Protocol::Mosh => "Mosh",
         }
     }
 
@@ -57,12 +60,14 @@ impl Protocol {
             Protocol::Rdp => "🖥",
             Protocol::Vnc => "🖵",
             Protocol::Local => "💻",
+            Protocol::Mosh => "📡",
         }
     }
 
     pub fn default_port(self) -> u16 {
         match self {
-            Protocol::Ssh => 22,
+            // Mosh logs in over SSH first.
+            Protocol::Ssh | Protocol::Mosh => 22,
             Protocol::Telnet => 23,
             Protocol::Rdp => 3389,
             Protocol::Vnc => 5900,
@@ -192,6 +197,7 @@ impl Session {
                 let p = match p.to_ascii_lowercase().as_str() {
                     "ssh" => Protocol::Ssh,
                     "telnet" => Protocol::Telnet,
+                    "mosh" => Protocol::Mosh,
                     "rdp" => Protocol::Rdp,
                     "vnc" => Protocol::Vnc,
                     "serial" => Protocol::Serial,
@@ -302,6 +308,9 @@ pub struct Settings {
     /// ssh binary; Windows 10+ ships OpenSSH as `ssh`.
     pub ssh_command: String,
     pub telnet_command: String,
+    /// Run `telnet_command` instead of the built-in Telnet client.
+    pub use_system_telnet: bool,
+    pub mosh_command: String,
     pub sftp_command: String,
     /// Where the SFTP browser saves downloads; empty means the system Downloads folder.
     pub download_dir: String,
@@ -350,6 +359,8 @@ impl Default for Settings {
             open_local_on_startup: false,
             ssh_command: "ssh".into(),
             telnet_command: "telnet".into(),
+            use_system_telnet: false,
+            mosh_command: "mosh".into(),
             sftp_command: "sftp".into(),
             download_dir: String::new(),
             local_shell: String::new(),
@@ -614,6 +625,11 @@ mod tests {
         assert_eq!(
             (s.protocol, s.host.as_str(), s.effective_port()),
             (Protocol::Telnet, "router", 23)
+        );
+        let s = Session::from_quick("mosh://bob@box").unwrap();
+        assert_eq!(
+            (s.protocol, s.user.as_str(), s.effective_port()),
+            (Protocol::Mosh, "bob", 22)
         );
         let s = Session::from_quick("[fe80::1]:22").unwrap();
         assert_eq!(s.host, "fe80::1");

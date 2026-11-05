@@ -24,6 +24,12 @@ pub enum Launch {
         device: String,
         settings: SerialSettings,
     },
+    /// The built-in Telnet client.
+    Telnet {
+        host: String,
+        port: u16,
+        autofill: Autofill,
+    },
     External {
         program: String,
         args: Vec<String>,
@@ -73,6 +79,53 @@ pub fn build(s: &Session, settings: &Settings) -> Result<Launch> {
             args.push(s.host.clone());
             Ok(Launch::Pty {
                 program: settings.ssh_command.clone(),
+                args,
+                autofill: Autofill {
+                    user: None,
+                    password: non_empty(&s.password),
+                },
+            })
+        }
+        Protocol::Telnet if !settings.use_system_telnet => {
+            if s.host.is_empty() {
+                return Err(anyhow!("no host set"));
+            }
+            Ok(Launch::Telnet {
+                host: s.host.clone(),
+                port: s.effective_port(),
+                autofill: Autofill {
+                    user: non_empty(&s.user),
+                    password: non_empty(&s.password),
+                },
+            })
+        }
+        Protocol::Mosh => {
+            if s.host.is_empty() {
+                return Err(anyhow!("no host set"));
+            }
+            // mosh starts the server over ssh; port and key go to that ssh.
+            let mut ssh = vec![settings.ssh_command.clone()];
+            if s.port != 0 && s.port != 22 {
+                ssh.extend(["-p".into(), s.port.to_string()]);
+            }
+            let mut for_ssh = s.clone();
+            for_ssh.extra_args.clear();
+            ssh.extend(ssh_common_args(&for_ssh)?);
+            let mut args = Vec::new();
+            if ssh.len() > 1 || settings.ssh_command != "ssh" {
+                let joined = shlex::try_join(ssh.iter().map(String::as_str))
+                    .map_err(|e| anyhow!("cannot quote ssh options: {e}"))?;
+                args.push(format!("--ssh={joined}"));
+            }
+            // Extra arguments are mosh's own, e.g. --predict=always.
+            args.extend(split_args(&s.extra_args)?);
+            args.push(if s.user.is_empty() {
+                s.host.clone()
+            } else {
+                format!("{}@{}", s.user, s.host)
+            });
+            Ok(Launch::Pty {
+                program: settings.mosh_command.clone(),
                 args,
                 autofill: Autofill {
                     user: None,
@@ -360,6 +413,63 @@ mod tests {
         );
         s.tunnels = vec!["X 1".into()];
         assert!(build(&s, &Settings::default()).is_err());
+    }
+
+    #[test]
+    fn telnet_builtin_or_system() {
+        let mut s = Session::new(Protocol::Telnet);
+        s.host = "router".into();
+        s.user = "admin".into();
+        let mut settings = Settings::default();
+        let Launch::Telnet {
+            host,
+            port,
+            autofill,
+        } = build(&s, &settings).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (host.as_str(), port, autofill.user.as_deref()),
+            ("router", 23, Some("admin"))
+        );
+        settings.use_system_telnet = true;
+        let Launch::Pty { program, args, .. } = build(&s, &settings).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (program.as_str(), args),
+            ("telnet", vec!["router".to_string(), "23".to_string()])
+        );
+    }
+
+    #[test]
+    fn mosh_args() {
+        let mut s = Session::new(Protocol::Mosh);
+        s.host = "box".into();
+        s.user = "bob".into();
+        let Launch::Pty { program, args, .. } = build(&s, &Settings::default()).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            (program.as_str(), args),
+            ("mosh", vec!["bob@box".to_string()])
+        );
+
+        s.port = 2222;
+        s.private_key = "/home/bob/.ssh/id ed25519".into();
+        s.extra_args = "--predict=always".into();
+        let Launch::Pty { args, .. } = build(&s, &Settings::default()).unwrap() else {
+            panic!()
+        };
+        assert_eq!(
+            args,
+            [
+                "--ssh=ssh -p 2222 -i '/home/bob/.ssh/id ed25519'",
+                "--predict=always",
+                "bob@box"
+            ]
+        );
     }
 
     #[test]

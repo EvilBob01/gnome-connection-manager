@@ -15,7 +15,14 @@ It lives next to the original Python app while it matures.
 - **Protocols**:
   - **SSH**: runs the system `ssh`, so `~/.ssh/config`, keys, the agent and `known_hosts` keep working.
     Supports tunnels (`L`/`R`/`D`), X11 and agent forwarding, compression, keep-alive and extra arguments.
-  - **Telnet**: runs the system `telnet`, typing the saved user name and password at the prompts.
+  - **Telnet**: a built-in client, so no `telnet` program is needed (Windows doesn't ship one by default).
+    It reports the window size and terminal type to the server, so full-screen programs fit the tab, and
+    types the saved user name and password at the prompts. *Settings → Telnet* can switch to the
+    system `telnet` instead, which is also the only way the session's *Extra arguments* are used.
+  - **Mosh**: runs the system `mosh`, which stays connected across sleep, roaming and changing networks.
+    The session's port, user and private key go to the ssh that mosh logs in with (`--ssh=...`), and
+    a saved password is typed at the ssh prompt. *Mosh options* are passed to mosh itself, e.g.
+    `--predict=always`. Mosh must be installed on both ends; the SFTP pane works for Mosh sessions too.
   - **Serial**: opens the port directly (`/dev/ttyUSB0`, `COM3`), with speed, data bits, parity, stop
     bits and flow control. The device field lists the ports it finds.
   - **RDP / VNC**: starts your normal client from a command template (see *Settings*).
@@ -39,7 +46,7 @@ It lives next to the original Python app while it matures.
   orange border. The bar under the toolbar also has *All*/*None* buttons and a command line that sends
   one line to the whole group. Keys are re-encoded for each target, so arrow keys work even when one
   terminal is in an application like vim or less.
-- **Quick connect** in the toolbar: `user@host:2222`, `telnet://router`, `rdp://winbox`,
+- **Quick connect** in the toolbar: `user@host:2222`, `mosh://user@box`, `telnet://router`, `rdp://winbox`,
   `serial://COM3:9600`.
 - **Password autofill**: replaces `ssh.expect`. A saved password is typed when the server first prints
   `password:`, and autofill switches off as soon as you type anything yourself.
@@ -198,7 +205,9 @@ Fallback fonts are picked up from DejaVu and Noto CJK if installed.
 
 - **SSH**: Windows 10 1809+ and Windows 11 ship the OpenSSH client (*Settings → Optional features →
   OpenSSH Client*).
-- **Telnet**: enable *Telnet Client* under *Turn Windows features on or off*.
+- **Telnet**: built in; nothing to install.
+- **Mosh**: Windows has no native mosh client. Install it in WSL or Cygwin and set *Settings → Mosh
+  command* accordingly (e.g. `wsl mosh`).
 - **RDP** uses `mstsc` and **VNC** expects `vncviewer.exe` (TigerVNC, RealVNC, …) on `PATH`. Change
   either in Settings.
 
