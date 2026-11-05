@@ -69,7 +69,7 @@ The browser opens a second connection with your system `sftp` (it ships with Ope
 Windows 10/11), using the session's host, port, user, key, keep-alive, compression and any `-o`/`-J`/`-F`
 options from *Extra arguments*. Keys, the agent, `~/.ssh/config` and `known_hosts` apply as usual.
 
-A saved password is handed to ssh through `SSH_ASKPASS`, which points back at `gcm` itself. That helper
+A saved password is handed to ssh through `SSH_ASKPASS`, which points back at `gcm-rs` itself. That helper
 answers only password and passphrase prompts. It refuses anything else, including new host keys and
 one-time codes, so if a host is new, connect once in an SSH tab to accept its key, then press *Reconnect*
 in the SFTP pane. The password reaches the helper through the `sftp` process's environment, which other
@@ -107,10 +107,53 @@ folder* opens it.
 ## Command line
 
 ```
-gcm [SESSION | [proto://][user@]host[:port]]...
+gcm-rs [SESSION | [proto://][user@]host[:port]]...
 ```
 
 Each argument opens a tab: either the name of a saved session or a quick-connect address.
+`man gcm-rs` has the details once the package is installed.
+
+## Packages
+
+Debian/Ubuntu and Fedora/RHEL/openSUSE packages install the `gcm-rs` command, a menu entry, an icon and a
+man page. They can be installed next to the original Python GCM.
+
+The packages are built against glibc 2.28, so they install on Debian 10+, Ubuntu 20.04+,
+RHEL/Rocky/Alma 8+, Fedora and openSUSE Leap 15+ (x86_64).
+
+```sh
+sudo apt install ./gcm-rs_0.1.0-1_amd64.deb     # Debian, Ubuntu
+sudo dnf install ./gcm-rs-0.1.0-1.x86_64.rpm    # Fedora, RHEL
+sudo zypper install ./gcm-rs-0.1.0-1.x86_64.rpm # openSUSE
+```
+
+`apt`/`dnf` also pull in what gcm-rs loads at run time (xkbcommon, OpenGL/EGL) and the recommended
+OpenSSH client. Telnet, FreeRDP, a VNC viewer and CJK fonts are optional extras (*Suggests*).
+
+Where to get them:
+
+- **From CI**: every push builds both packages. They're in the *gcm-rs-packages* artifact of the workflow
+  run.
+- **Releases**: pushing a tag `gcm-rs-v<version>` that matches `Cargo.toml` publishes a GitHub release
+  with the `.deb`, the `.rpm` and a Windows `.zip`.
+- **Build them yourself**:
+
+  ```sh
+  cargo install --locked cargo-deb cargo-generate-rpm cargo-zigbuild
+  pip install ziglang         # or install zig from your distribution
+  cd gcm-rs
+  # Link against glibc 2.28 so the package runs on older distributions too.
+  cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
+  cargo deb --no-build --target x86_64-unknown-linux-gnu
+  cargo generate-rpm --target x86_64-unknown-linux-gnu --payload-compress gzip
+  # -> target/x86_64-unknown-linux-gnu/{debian,generate-rpm}/
+  ```
+
+  A plain `cargo build --release` also works, but the result needs the glibc of the machine it was built on.
+  `--payload-compress gzip` keeps the RPM readable by older rpm versions.
+
+Package metadata (dependencies, files) lives in `Cargo.toml` under `[package.metadata.deb]` and
+`[package.metadata.generate-rpm]`.
 
 ## Building
 
@@ -119,7 +162,7 @@ You need Rust 1.95 or newer ([rustup.rs](https://rustup.rs)).
 ```sh
 cd gcm-rs
 cargo build --release
-./target/release/gcm          # Windows: target\release\gcm.exe
+./target/release/gcm-rs       # Windows: target\release\gcm-rs.exe
 ```
 
 ### Linux

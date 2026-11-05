@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=GNOME Connection Manager (gcm-rs)
+GenericName=Connection Manager
+Comment=Tabbed SSH, SFTP, Telnet, serial, RDP and VNC connection manager
+Exec=gcm-rs
+Icon=gcm-rs
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=ssh;sftp;telnet;serial;rdp;vnc;terminal;tunnel;
+StartupWMClass=gcm-rs

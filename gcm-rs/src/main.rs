@@ -10,7 +10,7 @@ mod sftp;
 mod terminal;
 mod tunnel;
 
-const USAGE: &str = "usage: gcm [SESSION | [proto://][user@]host[:port]]...
+const USAGE: &str = "usage: gcm-rs [SESSION | [proto://][user@]host[:port]]...
 
 Opens a tab for each argument: the name of a saved session, or an address
 in quick-connect form (ssh is the default protocol).";
@@ -26,7 +26,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("gcm {}", env!("CARGO_PKG_VERSION"));
+        println!("gcm-rs {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let store = match config::Store::load_default() {
@@ -41,7 +41,11 @@ fn main() -> eframe::Result {
             .with_title("GNOME Connection Manager")
             .with_app_id("gcm-rs")
             .with_inner_size([1200.0, 760.0])
-            .with_min_inner_size([640.0, 400.0]),
+            .with_min_inner_size([640.0, 400.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../packaging/gcm-rs.png"))
+                    .unwrap_or_default(),
+            ),
         ..Default::default()
     };
     eframe::run_native(

@@ -1,0 +1,78 @@
+name: gcm-rs release
+
+# Push a tag such as gcm-rs-v0.1.0 to publish a GitHub release with the
+# .deb, .rpm and Windows .exe attached.
+on:
+  push:
+    tags: ["gcm-rs-v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gcm-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb,cargo-generate-rpm,cargo-zigbuild
+      - name: Check the tag matches Cargo.toml
+        run: |
+          want="gcm-rs-v$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          test "$GITHUB_REF_NAME" = "$want" || { echo "tag $GITHUB_REF_NAME != $want"; exit 1; }
+      - name: Build .deb and .rpm (against glibc 2.28)
+        run: |
+          pip install ziglang
+          cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.28
+          # The packages promise glibc >= 2.28; fail if a change raises that.
+          newest=$(objdump -T target/x86_64-unknown-linux-gnu/release/gcm-rs | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "newest glibc symbol: $newest"
+          test "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" = GLIBC_2.28
+          cargo deb --no-build --target x86_64-unknown-linux-gnu
+          cargo generate-rpm --target x86_64-unknown-linux-gnu --payload-compress gzip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            gcm-rs/target/x86_64-unknown-linux-gnu/debian/*.deb
+            gcm-rs/target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: gcm-rs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Zip
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^gcm-rs-v', ''
+          Compress-Archive -Path target/release/gcm-rs.exe, README.md, LICENSE -DestinationPath "gcm-rs-$v-windows-x86_64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: gcm-rs/gcm-rs-*-windows-x86_64.zip
+
+  publish:
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/**/*.deb
+            dist/**/*.rpm
+            dist/**/*.zip
+          generate_release_notes: true
