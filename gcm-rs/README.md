@@ -246,7 +246,11 @@ when no password is saved. Defaults:
 | File | Purpose |
 |---|---|
 | `src/main.rs` | Startup and command-line handling |
-| `src/app.rs` | Window, session tree, tabs, dialogs |
+| `src/app/mod.rs` | App state, connecting sessions, actions, the frame loop |
+| `src/app/toolbar.rs` | Menu bar, toolbar, quick connect, MultiExec bar, import menu |
+| `src/app/sidebar.rs` | Session tree, SFTP pane, tunnels pane, start screen |
+| `src/app/dialogs.rs` | Dialogs: session editor, settings, tunnels, import, confirmations |
+| `src/app/tabs.rs` | Terminal tabs: titles, tab menu, closing |
 | `src/terminal.rs` | Terminal widget: PTY/serial I/O, rendering, keyboard and mouse |
 | `src/sftp.rs` | SFTP browser: drives the system `sftp`, file table |
 | `src/tunnel.rs` | Tunnel manager: saved forwards, `ssh -N` processes, status |
